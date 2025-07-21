@@ -1,0 +1,1 @@
+from pingtile.version import __version__
