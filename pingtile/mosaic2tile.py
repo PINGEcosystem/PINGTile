@@ -11,7 +11,7 @@ from joblib import Parallel, delayed
 from tqdm import tqdm
 import pandas as pd
 
-from pingtile.utils import reproject_raster, getMovingWindow, doMovWin
+from pingtile.utils import reproject_raster, getMovingWindow_rast, doMovWin
 
 #=======================================================================
 def doMosaic2tile(inFile: str,
@@ -33,7 +33,7 @@ def doMosaic2tile(inFile: str,
     mosaic_reproj = reproject_raster(src_path=inFile, dst_path=outDir, dst_crs=epsg_out)
         
     # Get the moving window
-    movWin = getMovingWindow(sonRast=mosaic_reproj, windowSize=windowSize, windowStride_m=windowStride_m)
+    movWin = getMovingWindow_rast(sonRast=mosaic_reproj, windowSize=windowSize, windowStride_m=windowStride_m)
 
     # Do moving window
     total_win = len(movWin)
@@ -48,9 +48,5 @@ def doMosaic2tile(inFile: str,
     dfAll = pd.DataFrame(sampleInfoAll)
 
     os.remove(mosaic_reproj) 
-
-    # Save df
-    outDF = os.path.join(outDir, f'{outName}_{windowSize[0]}_{windowSize[1]}_samples.csv')
-    dfAll.to_csv(outDF, index=False) 
     
     return dfAll

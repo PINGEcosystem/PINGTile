@@ -41,7 +41,7 @@ setup(
         "oceanography",
         "limnology",],
     python_requires="<3.13",
-    install_requires=['pinginstaller', 'pingwizard'],
+    install_requires=['numpy', 'pandas', 'geopandas', 'rasterio', 'shapely', 'fiona', 'joblib', 'tqdm', 'matplotlib', 'scikit-image', 'scipy'],
     project_urls={
         "Issues": "https://github.com/PINGEcosystem/PINGTile/issues",
         "GitHub":"https://github.com/PINGEcosystem/PINGTile",
