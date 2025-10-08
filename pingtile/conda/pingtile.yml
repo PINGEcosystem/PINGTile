@@ -18,3 +18,5 @@ dependencies:
   - pip:
     - pinginstaller
     - pingtile
+    - opencv-python
+    - roboflow

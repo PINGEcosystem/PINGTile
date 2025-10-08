@@ -9,11 +9,16 @@ Copyright (c) 2025 Cameron S. Bodine
 import os, sys
 from joblib import Parallel, delayed, cpu_count
 
-# # Debug
-# from imglbl2tile import doImgLbl2tile
+# Debug
+from imglbl2tile import doImgLbl2tile
+from utils import mask_to_coco_json
 
-# For Package
-from pingtile.imglbl2tile import doImgLbl2tile
+# # For Package
+# from pingtile.imglbl2tile import doImgLbl2tile
+# from pingtile.utils import mask_to_coco_json
+
+import rasterio as rio
+import json
 
 ############
 # Parameters
@@ -45,6 +50,7 @@ target_size = (512, 512) #(1024, 1024)
 threadCnt = 0.75
 epsg_out = 32616
 doPlot = True
+lbl2COCO = True
 
 if not os.path.exists(outDirTop):
     os.makedirs(outDirTop)
@@ -81,38 +87,128 @@ for root, dirs, files in os.walk(sonarDir):
             sonarFiles.append(os.path.join(root, file))
 
 
-for windowSize in windowSize_m:
+# for windowSize in windowSize_m:
 
-    # windowStride_m = windowStride*windowSize[0]
-    windowStride_m = windowStride
-    # minArea = minArea_percent * windowSize[0]*windowSize[1]
+#     # windowStride_m = windowStride*windowSize[0]
+#     windowStride_m = windowStride
+#     # minArea = minArea_percent * windowSize[0]*windowSize[1]
 
-    dirName = f"{windowSize[0]}_{windowSize[0]}"
-    outDir = os.path.join(outDirTop, dirName)
-    outSonDir = os.path.join(outDir, 'images')
-    outMaskDir = os.path.join(outDir,'labels')
-    pltDir = os.path.join(outDir,'plots')
+#     dirName = f"{windowSize[0]}_{windowSize[0]}"
+#     outDir = os.path.join(outDirTop, dirName)
+#     outSonDir = os.path.join(outDir, 'images')
+#     outMaskDir = os.path.join(outDir,'labels')
+#     pltDir = os.path.join(outDir,'plots')
 
-    if not os.path.exists(outSonDir):
-        os.makedirs(outSonDir)
-        os.makedirs(outMaskDir)
-        os.makedirs(pltDir)
+#     if not os.path.exists(outSonDir):
+#         os.makedirs(outSonDir)
+#         os.makedirs(outMaskDir)
+#         os.makedirs(pltDir)
 
-    for sonarFile in sonarFiles:
+#     for sonarFile in sonarFiles:
 
-        print(f"\nProcessing {os.path.basename(sonarFile)} with windowSize: {windowSize} and windowStride_m: {windowStride_m}...\n")
+#         print(f"\nProcessing {os.path.basename(sonarFile)} with windowSize: {windowSize} and windowStride_m: {windowStride_m}...\n")
 
-        doImgLbl2tile(inFileSonar=sonarFile,
-                      inFileMask=map,
-                      outDir=outDir,
-                      outName=outName,
-                      epsg_out=epsg_out,
-                      classCrossWalk=classCrossWalk,
-                      windowSize=windowSize,
-                      windowStride_m=windowStride_m,
-                      classFieldName=classFieldName,
-                      minArea_percent=minArea_percent,
-                      target_size=target_size,
-                      threadCnt=threadCnt,
-                      doPlot=doPlot
-                      )
+#         doImgLbl2tile(inFileSonar=sonarFile,
+#                       inFileMask=map,
+#                       outDir=outDir,
+#                       outName=outName,
+#                       epsg_out=epsg_out,
+#                       classCrossWalk=classCrossWalk,
+#                       windowSize=windowSize,
+#                       windowStride_m=windowStride_m,
+#                       classFieldName=classFieldName,
+#                       minArea_percent=minArea_percent,
+#                       target_size=target_size,
+#                       threadCnt=threadCnt,
+#                       doPlot=doPlot
+#                       )
+
+# Convert masks to COCO format
+if lbl2COCO:
+    
+
+    for windowSize in windowSize_m:
+
+        dirName = f"{windowSize[0]}_{windowSize[0]}"
+        outDir = os.path.join(outDirTop, dirName)
+        outSonDir = os.path.join(outDir, 'images')
+        outMaskDir = os.path.join(outDir,'labels')
+        pltDir = os.path.join(outDir,'plots')
+        outJsonDir = os.path.join(outDir,'json')
+
+        if not os.path.exists(outJsonDir):
+            os.makedirs(outJsonDir)
+
+        print(f"\nConverting to COCO format for windowSize: {windowSize}...\n")
+
+        # Get the mask files
+        maskFiles = []
+        for root, dirs, files in os.walk(outMaskDir):
+            for file in files:
+                if file.lower().endswith(('.tif', '.tiff', '.png', '.jpg', '.jpeg')):
+                    maskFiles.append(os.path.join(root, file))
+
+        maskFiles=maskFiles[:10] # Debug limit to 10 files
+
+        # Build categories list / lookup from classCrossWalk
+        # categories_info passed to mask_to_coco_json should map id -> name
+        categories_info = {v: str(k) for k, v in classCrossWalk.items()}
+        # COCO categories (exclude background id 0 if present)
+        categories = [{"id": v, "name": str(k)} for k, v in classCrossWalk.items() if v != 0]
+
+        coco = {
+            "info": {"description": outName or ""},
+            "licenses": [],
+            "images": [],
+            "annotations": [],
+            "categories": categories
+        }
+
+        annotation_id = 1
+        image_id = 1
+
+        for mask_path in maskFiles:
+            base = os.path.splitext(os.path.basename(mask_path))[0]
+
+            # try to find corresponding image filename in images folder (same base name)
+            matched_image = None
+            for ext in ('.png', '.jpg', '.jpeg', '.tif', '.tiff'):
+                candidate = os.path.join(outSonDir, base + ext)
+                if os.path.exists(candidate):
+                    matched_image = os.path.basename(candidate)
+                    break
+            if matched_image is None:
+                # fallback to mask basename (acceptable as file_name in COCO)
+                matched_image = os.path.basename(mask_path)
+
+            # read mask to get width/height
+            try:
+                with rio.open(mask_path) as src:
+                    width, height = src.width, src.height
+            except Exception as e:
+                print(f"Skipping {mask_path}: cannot read ({e})")
+                continue
+
+            image_info = {
+                "id": image_id,
+                "file_name": matched_image,
+                "width": width,
+                "height": height
+            }
+
+            # mask_to_coco_json should return (annotations_list, next_annotation_id)
+            anns, annotation_id = mask_to_coco_json(mask_path, image_info, categories_info, annotation_id)
+
+            if anns:
+                coco["images"].append(image_info)
+                coco["annotations"].extend(anns)
+                image_id += 1
+
+        out_json = os.path.join(outJsonDir, f"_annotations.coco.json")
+        with open(out_json, "w") as f:
+            json.dump(coco, f)
+
+        
+        
+
+        

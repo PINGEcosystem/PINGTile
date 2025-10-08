@@ -18,7 +18,8 @@ from skimage.transform import resize, warp, PiecewiseAffineTransform
 from joblib import Parallel, delayed
 from tqdm import tqdm
 from shapely.geometry import box, shape
-from PIL import ImageColor
+from PIL import ImageColor, Image
+import cv2
 
 from skimage.io import imsave, imread
 import matplotlib.pyplot as plt
@@ -915,8 +916,44 @@ class FastPiecewiseAffineTransform(PiecewiseAffineTransform):
 
 
 
+#========================================================
+def mask_to_coco_json(mask_path, image_info, categories_info, annotation_id_counter, simplify_tol=0.01):
+    mask = np.array(Image.open(mask_path))
+    annotations = []
 
+    for category_id, category_name in categories_info.items():
+        # Create binary mask for the current category
+        binary_mask = (mask == category_id).astype(np.uint8) * 255
 
+        # Find contours
+        contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        for contour in contours:
+            if cv2.contourArea(contour) > 0: # Filter out small or empty contours
+                # simplify contour with approxPolyDP (epsilon = fraction of perimeter)
+                peri = cv2.arcLength(contour, True)
+                epsilon = max(1.0, simplify_tol * peri)  # at least 1px epsilon to drop tiny wiggles
+                approx = cv2.approxPolyDP(contour, epsilon, True)
+
+                if approx.shape[0] < 3:
+                    continue  # need at least 3 points for a polygon
+
+                segmentation = approx.reshape(-1, 2).flatten().tolist()
+                x, y, w, h = cv2.boundingRect(contour)
+                bbox = [x, y, w, h]
+                area = cv2.contourArea(contour)
+
+                annotations.append({
+                    "id": annotation_id_counter,
+                    "image_id": image_info["id"],
+                    "category_id": category_id,
+                    "segmentation": [segmentation], # COCO expects a list of polygons
+                    "area": area,
+                    "bbox": bbox,
+                    "iscrowd": 0
+                })
+                annotation_id_counter += 1
+    return annotations, annotation_id_counter
 
 
 
