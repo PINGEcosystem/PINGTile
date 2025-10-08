@@ -1,4 +1,4 @@
-name: ping
+name: pingtile
 channels:
   - conda-forge
 dependencies:
