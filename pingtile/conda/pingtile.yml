@@ -1,0 +1,20 @@
+name: ping
+channels:
+  - conda-forge
+dependencies:
+  - python<3.13
+  - gdal
+  - numpy
+  - git
+  - pandas
+  - geopandas
+  - rasterio
+  - shapely
+  - fiona
+  - joblib
+  - tqdm
+  - matplotlib
+  - scikit-image
+  - pip:
+    - pinginstaller
+    - pingtile
