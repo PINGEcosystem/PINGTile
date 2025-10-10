@@ -31,9 +31,16 @@ def doMosaic2tile(inFile: str,
 
     # Reproject raster to epsg_out (if necessary)
     mosaic_reproj = reproject_raster(src_path=inFile, dst_path=outDir, dst_crs=epsg_out)
+
+    # # debug
+    # mosaic_reproj = r'Z:\scratch\HabiMapper_Test\R00107_rect_wcr_mosaic_0_reproj.tif'
         
     # Get the moving window
     movWin = getMovingWindow_rast(sonRast=mosaic_reproj, windowSize=windowSize, windowStride_m=windowStride_m)
+
+    # Debug save geodataframe to shp
+    out_file = os.path.join(outDir, 'mov_win.shp')
+    movWin.to_file(out_file, driver='ESRI Shapefile')
 
     # Do moving window
     total_win = len(movWin)
@@ -47,6 +54,6 @@ def doMosaic2tile(inFile: str,
 
     dfAll = pd.DataFrame(sampleInfoAll)
 
-    os.remove(mosaic_reproj) 
+    # os.remove(mosaic_reproj) 
     
     return dfAll

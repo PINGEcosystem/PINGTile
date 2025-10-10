@@ -122,29 +122,40 @@ def getMovingWindow_rast(sonRast: str,
     # Open the raster
     with rio.open(sonRast) as sonRast:
 
-        # Calculate window size and stride in pixels
+        # compute window size in pixels (round to nearest)
         windowSize_px = (
-            int(windowSize[0] / sonRast.res[0]),
-            int(windowSize[1] / sonRast.res[1])
+            int(round(windowSize[0] / sonRast.res[0])),
+            int(round(windowSize[1] / sonRast.res[1])),
         )
-        windowStride_px = int(windowStride_m / sonRast.res[0])
+
+        # compute stride in pixels (no mysterious /2). Ensure at least 1 px.
+        windowStride_px = max(1, int(round(windowStride_m / sonRast.res[0])))
 
         movWindow = []
 
-        # Create moving windows
-        for i in range(0, sonRast.width - windowSize_px[0] + 1, windowStride_px):
-            for j in range(0, sonRast.height - windowSize_px[1] + 1, windowStride_px):
+        # iterate windows but ensure the window stays inside raster bounds
+        # use last-start positions so we include the right/bottom edge when not divisible
+        x_starts = list(range(0, sonRast.width + 1, windowStride_px))
+        y_starts = list(range(0, sonRast.height + 1, windowStride_px))
+        # # if there is leftover remainder, include the last window anchored at the edge
+        # if (sonRast.width - windowSize_px[0]) not in x_starts:
+        #     x_starts.append(sonRast.width - windowSize_px[0])
+        # if (sonRast.height - windowSize_px[1]) not in y_starts:
+        #     y_starts.append(sonRast.height - windowSize_px[1])
+
+        for i in x_starts:
+            for j in y_starts:
                 window = rio.windows.Window(i, j, windowSize_px[0], windowSize_px[1])
-                window_transform = sonRast.window_transform(window)
-                window_extent = rio.windows.bounds(window, transform=window_transform)
+                # pass the dataset transform (not the window transform)
+                window_extent = rio.windows.bounds(window, transform=sonRast.transform)
                 movWindow.append(window_extent)
 
-        # Convert movWindow into a gdf
-        # Convert movWindow into a list of geometries
-        geometries = [shapely.geometry.box(extent[0], extent[1], extent[2], extent[3]) for extent in movWindow]
+    # Convert movWindow into a gdf
+    # Convert movWindow into a list of geometries
+    geometries = [shapely.geometry.box(extent[0], extent[1], extent[2], extent[3]) for extent in movWindow]
 
-        # Create a GeoDataFrame
-        gdf = gpd.GeoDataFrame(geometry=geometries, crs=sonRast.crs)
+    # Create a GeoDataFrame
+    gdf = gpd.GeoDataFrame(geometry=geometries, crs=sonRast.crs)
 
     return gdf
 
@@ -430,8 +441,6 @@ def doMovWin(i: int,
              windowSize: tuple,
              reclassify: dict={},
              ):
-    
-    print(i)
 
     mosaicName = os.path.basename(mosaic)
 
@@ -452,7 +461,7 @@ def doMovWin(i: int,
         win_coords = win_coords[:-1]
         
         try:
-            clipped_mosaic, clipped_transform = mask(sonRast, [window_geom], crop=True)
+            clipped_mosaic, clipped_transform = mask(sonRast, [window_geom], crop=True, )
 
             clipped_mosaic = clipped_mosaic[0, :, :]
 
@@ -487,7 +496,6 @@ def doMovWin(i: int,
                         fileName = f"{mosaicName}_{windowSize[0]}m_{win_coords}"
                     out_raster_path = os.path.join(outSonDir, 'images', f"{fileName}.png")
                     
-                    print(out_raster_path)
                     with rio.open(
                         out_raster_path,
                         'w',
@@ -511,7 +519,8 @@ def doMovWin(i: int,
                                     'x_max': window_bounds[2],
                                     'y_max': window_bounds[3],
                                     'total_pix': clipped_raster_resized.shape[0]*clipped_raster_resized.shape[1],
-                                    'nonzero_prop': non_zero_percentage}
+                                    'nonzero_prop': non_zero_percentage,
+                                    'geometry': movWin.geometry}
 
                     return sampleInfo
                 pass
@@ -538,10 +547,19 @@ def avg_npz_files_batch(df: pd.DataFrame,
 
     win_minx, win_miny, win_maxx, win_maxy = win.geometry.bounds
 
-    # Calculate pixel size for the window array
-    win_height, win_width = arr_shape[1], arr_shape[2]  # (bands, height, width)
-    win_pixel_size_x = (win_maxx - win_minx) / win_width
-    win_pixel_size_y = (win_maxy - win_miny) / win_height
+    # Calculate pixel size for the window array (arr_shape expected = (bands, height, width))
+    try:
+        win_bands, win_height, win_width = arr_shape
+    except Exception:
+        # fallback in case arr_shape was provided as (height, width) or similar
+        if len(arr_shape) == 2:
+            win_bands = 1
+            win_height, win_width = arr_shape
+        else:
+            raise
+
+    # We'll use rasterio transforms to map world coordinates -> pixel indices.
+    # This handles negative coordinates and the image row/col orientation correctly.
 
 
     win_coords = ''
@@ -561,19 +579,25 @@ def avg_npz_files_batch(df: pd.DataFrame,
     if overlaps.empty:
         return
 
-    # Determine output array shape for this window
-    sum_arr = np.zeros(arr_shape, dtype=np.float64)
-    count_arr = np.zeros((arr_shape[1], arr_shape[2]), dtype=np.int32)
+    # Determine output array shape for this window (bands, height, width)
+    sum_arr = np.zeros((win_bands, win_height, win_width), dtype=np.float64)
+    count_arr = np.zeros((win_height, win_width), dtype=np.int32)
 
     for _, row in overlaps.iterrows():
         base = os.path.splitext(os.path.basename(row['mosaic']))[0]
         npz_path = os.path.join(in_dir, f"{base}.npz")
         npz = np.load(npz_path)
         arr = npz['softmax']
+        # array geospatial bounds for this tile
         arr_minx, arr_miny, arr_maxx, arr_maxy = row[['x_min', 'y_min', 'x_max', 'y_max']]
-        arr_shape = arr.shape  # (bands, height, width)
-        arr_pixel_size_x = (arr_maxx - arr_minx) / arr_shape[2]
-        arr_pixel_size_y = (arr_maxy - arr_miny) / arr_shape[1]
+        # Ensure arr has shape (bands, height, width)
+        if arr.ndim == 2:
+            # single band -> (1, H, W)
+            arr = arr[np.newaxis, ...]
+        arr_bands, arr_h, arr_w = arr.shape
+        # compute pixel sizes for this array (float)
+        arr_pixel_size_x = (arr_maxx - arr_minx) / float(arr_w)
+        arr_pixel_size_y = (arr_maxy - arr_miny) / float(arr_h)
 
 
         # Calculate overlap in world coordinates
@@ -582,31 +606,72 @@ def avg_npz_files_batch(df: pd.DataFrame,
         overlap_miny = max(win_miny, arr_miny)
         overlap_maxy = min(win_maxy, arr_maxy)
 
-        # Convert world coordinates to array indices
-        win_x0 = int(np.floor((overlap_minx - win_minx) / win_pixel_size_x))
-        win_x1 = int(np.ceil((overlap_maxx - win_minx) / win_pixel_size_x))
-        win_y0 = int(np.floor((overlap_miny - win_miny) / win_pixel_size_y))
-        win_y1 = int(np.ceil((overlap_maxy - win_miny) / win_pixel_size_y))
+        # Build transforms for window and tile arrays
+        try:
+            transform_win = rio.transform.from_bounds(win_minx, win_miny, win_maxx, win_maxy, win_width, win_height)
+            transform_arr = rio.transform.from_bounds(arr_minx, arr_miny, arr_maxx, arr_maxy, arr_w, arr_h)
 
-        arr_x0 = int(np.floor((overlap_minx - arr_minx) / arr_pixel_size_x))
-        arr_x1 = int(np.ceil((overlap_maxx - arr_minx) / arr_pixel_size_x))
-        arr_y0 = int(np.floor((overlap_miny - arr_miny) / arr_pixel_size_y))
-        arr_y1 = int(np.ceil((overlap_maxy - arr_miny) / arr_pixel_size_y))
+            # Map overlap box corners to fractional pixel coordinates.
+            # Use top-left (minx, maxy) and bottom-right (maxx, miny) to get correct row ordering.
+            win_col0, win_row0 = ~transform_win * (overlap_minx, overlap_maxy)
+            win_col1, win_row1 = ~transform_win * (overlap_maxx, overlap_miny)
 
-        # Check for valid overlap and matching shapes
-        win_slice_shape = (win_y1 - win_y0, win_x1 - win_x0)
-        arr_slice_shape = (arr_y1 - arr_y0, arr_x1 - arr_x0)
-        if (win_slice_shape[0] > 0 and win_slice_shape[1] > 0 and
-            arr_slice_shape[0] > 0 and arr_slice_shape[1] > 0 and
-            win_slice_shape == arr_slice_shape):
-            sum_arr[:, win_y0:win_y1, win_x0:win_x1] += arr[:, arr_y0:arr_y1, arr_x0:arr_x1]
-            count_arr[win_y0:win_y1, win_x0:win_x1] += 1
+            arr_col0, arr_row0 = ~transform_arr * (overlap_minx, overlap_maxy)
+            arr_col1, arr_row1 = ~transform_arr * (overlap_maxx, overlap_miny)
 
+            # Convert fractional to integer pixel slice indices (start inclusive, end exclusive).
+            win_x0 = int(np.floor(min(win_col0, win_col1)))
+            win_x1 = int(np.ceil(max(win_col0, win_col1)))
+            win_y0 = int(np.floor(min(win_row0, win_row1)))
+            win_y1 = int(np.ceil(max(win_row0, win_row1)))
 
-        # print('\n\n', win_x0, win_x1, win_y0, win_y1, sum_arr.shape)
-        # print(arr_x0, arr_x1, arr_y0, arr_y1, arr.shape)
-        # print('Overlap:', overlap_minx, overlap_miny, overlap_maxx, overlap_maxy)
-        # print(arr_pixel_size_x, arr_pixel_size_y)
+            arr_x0 = int(np.floor(min(arr_col0, arr_col1)))
+            arr_x1 = int(np.ceil(max(arr_col0, arr_col1)))
+            arr_y0 = int(np.floor(min(arr_row0, arr_row1)))
+            arr_y1 = int(np.ceil(max(arr_row0, arr_row1)))
+        except Exception:
+            # Fallback to previous pixel-size approach if transforms fail for any reason
+            win_x0 = int(np.floor((overlap_minx - win_minx) / ((win_maxx - win_minx) / float(win_width))))
+            win_x1 = int(np.ceil((overlap_maxx - win_minx) / ((win_maxx - win_minx) / float(win_width))))
+            win_y0 = int(np.floor((overlap_miny - win_miny) / ((win_maxy - win_miny) / float(win_height))))
+            win_y1 = int(np.ceil((overlap_maxy - win_miny) / ((win_maxy - win_miny) / float(win_height))))
+
+            arr_x0 = int(np.floor((overlap_minx - arr_minx) / arr_pixel_size_x))
+            arr_x1 = int(np.ceil((overlap_maxx - arr_minx) / arr_pixel_size_x))
+            arr_y0 = int(np.floor((overlap_miny - arr_miny) / arr_pixel_size_y))
+            arr_y1 = int(np.ceil((overlap_maxy - arr_miny) / arr_pixel_size_y))
+
+        # Clamp indices to array bounds
+        win_x0 = max(0, min(win_width, win_x0))
+        win_x1 = max(0, min(win_width, win_x1))
+        win_y0 = max(0, min(win_height, win_y0))
+        win_y1 = max(0, min(win_height, win_y1))
+
+        arr_x0 = max(0, min(arr_w, arr_x0))
+        arr_x1 = max(0, min(arr_w, arr_x1))
+        arr_y0 = max(0, min(arr_h, arr_y0))
+        arr_y1 = max(0, min(arr_h, arr_y1))
+
+        # Determine slice shapes
+        win_h = win_y1 - win_y0
+        win_w = win_x1 - win_x0
+        arr_h_slice = arr_y1 - arr_y0
+        arr_w_slice = arr_x1 - arr_x0
+
+        if win_h > 0 and win_w > 0 and arr_h_slice > 0 and arr_w_slice > 0:
+            # If the shapes differ by 1 due to rounding, try to align by trimming the larger
+            # slice to match the smaller one (this is conservative and avoids broadcasting issues).
+            use_h = min(win_h, arr_h_slice)
+            use_w = min(win_w, arr_w_slice)
+
+            win_ys = slice(win_y0, win_y0 + use_h)
+            win_xs = slice(win_x0, win_x0 + use_w)
+            arr_ys = slice(arr_y0, arr_y0 + use_h)
+            arr_xs = slice(arr_x0, arr_x0 + use_w)
+
+            # accumulate
+            sum_arr[:, win_ys, win_xs] += arr[:, arr_ys, arr_xs]
+            count_arr[win_ys, win_xs] += 1
 
     # Avoid division by zero
     avg_arr = np.divide(sum_arr, count_arr, out=np.zeros_like(sum_arr), where=count_arr != 0)
@@ -621,9 +686,23 @@ def avg_npz_files_batch(df: pd.DataFrame,
         fileName = f"{windowSize_m[0]}m_{win_coords}"
     out_npz = os.path.join(out_dir, f"{fileName}.npz")
 
-    df['npz'] = out_npz
+    # df['npz'] = out_npz
 
     np.savez_compressed(out_npz, softmax=avg_arr)
+
+
+    # Create output DataFrame row
+    df = pd.DataFrame({
+        'npz': [out_npz],
+        'window_size': [windowSize_m[0]],
+        'x_min': [win_minx],
+        'y_min': [win_miny],
+        'x_max': [win_maxx],
+        'y_max': [win_maxy],
+        'total_pix': [avg_arr.shape[1]*avg_arr.shape[2]],
+        'nonzero_prop': [np.count_nonzero(avg_arr) / avg_arr.size if avg_arr.size > 0 else 0]
+    })
+
 
     # Convert to GeoDataFrame
     geometry = box(win_minx, win_miny, win_maxx, win_maxy)
@@ -673,6 +752,82 @@ def avg_npz_files(df: pd.DataFrame,
     return results
 
 
+#========================================================
+def label_array_to_raster(df, out_dir: str, outName: str, windowSize_m: tuple, epsg: int):
+    """
+    Create a georeferenced single-band GeoTIFF from an npz softmax array.
+
+    Parameters
+    - row: single-row DataFrame or Series containing at least 'npz' (path) and 'geometry' (bounding box)
+    - out_dir: directory to write the GeoTIFF
+    - outName: optional prefix for output filename
+    - windowSize_m: tuple (size, size) used for naming (only first element used)
+    - epsg: integer EPSG code for CRS
+
+    Returns
+    - out_path (str) on success, None on failure
+    """
+
+    # Load npz
+    npz = np.load(df['npz'])
+
+    softmax = npz['softmax']
+
+    label = np.argmax(softmax, axis=0).astype(np.uint8)  # Assuming softmax shape is (classes, height, width)
+    # label += 1
+
+    geom = df['geometry']
+    # geometry may be a shapely geometry or a GeoSeries element
+    if isinstance(geom, (list, np.ndarray)):
+        geom = geom[0]
+    minx, miny, maxx, maxy = geom.bounds
+
+    height, width = label.shape
+    transform = rio.transform.from_bounds(minx, miny, maxx, maxy, width, height)
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    base = os.path.splitext(os.path.basename(df['npz']))[0]
+    if outName:
+        out_fname = f"{outName}_{base}_{windowSize_m[0]}m.tif"
+    else:
+        out_fname = f"{base}_{windowSize_m[0]}m.tif"
+    out_path = os.path.join(out_dir, out_fname)
+
+    # Prepare colors
+    class_colormap = {0: '#3366CC',
+                        1: '#DC3912',
+                        2: '#FF9900',
+                        3: '#109618',
+                        4: '#990099', 
+                        5: '#0099C6',
+                        6: '#DD4477',
+                        7: '#66AA00',
+                        8: '#B82E2E'}
+    
+    for k, v in class_colormap.items():
+        rgb = ImageColor.getcolor(v, 'RGB')
+        class_colormap[k] = rgb
+
+    with rio.open(
+        out_path,
+        'w',
+        driver='GTiff',
+        height=height,
+        width=width,
+        count=1,
+        dtype=label.dtype,
+        crs=f"EPSG:{epsg}",
+        transform=transform,
+    ) as dst:
+        dst.nodata = 0
+        dst.write(label, 1)
+        dst.write_colormap(1, class_colormap)
+
+    return out_path
+
+
+
 # def label_array_to_shapefile(df, in_dir, out_dir, outName, windowSize_m, epsg):
 #     """
 #     Convert a label array to polygons and save as a shapefile.
@@ -720,145 +875,145 @@ def avg_npz_files(df: pd.DataFrame,
     
 #     return gdf
 
-#========================================================
-def label_array_to_raster(df, in_dir, out_dir, outName, windowSize_m, epsg, filt=50):
-    """
-    Convert a label array to polygons and save as a gtiff.
+# #========================================================
+# def label_array_to_raster(df, in_dir, out_dir, outName, windowSize_m, epsg, filt=50):
+#     """
+#     Convert a label array to polygons and save as a gtiff.
 
-    label: 2D numpy array of class labels
-    transform: affine transform for the array (e.g., from rasterio)
-    out_shp: output shapefile path
-    """
+#     label: 2D numpy array of class labels
+#     transform: affine transform for the array (e.g., from rasterio)
+#     out_shp: output shapefile path
+#     """
 
-    # Load npz
-    # base = os.path.splitext(os.path.basename(df.iloc[0]['mosaic']))[0]
-    # npz_path = os.path.join(in_dir, f"{base}.npz")
-    npz = np.load(df['npz'].values[0])
+#     # Load npz
+#     # base = os.path.splitext(os.path.basename(df.iloc[0]['mosaic']))[0]
+#     # npz_path = os.path.join(in_dir, f"{base}.npz")
+#     npz = np.load(df['npz'].values[0])
 
-    softmax = npz['softmax']
-    label = np.argmax(softmax, axis=0).astype(np.uint8)  # Assuming softmax shape is (classes, height, width)
+#     softmax = npz['softmax']
+#     label = np.argmax(softmax, axis=0).astype(np.uint8)  # Assuming softmax shape is (classes, height, width)
 
-    #################################
-    # Prepare pixel (pix) coordinates
-    ## Pix coordinates describe the size of the coordinates in pixels
-    ## Coordinate Order
-    ## top left of dat == port(range, 0)
-    ## bot left of dat == star(range, 0)
-    ## top next == port(range, 0+filt)
-    ## bottom next == star(range, 0+filt)
-    ## ....
-    rows, cols = label.shape # Determine number rows/cols
-    pix_cols = np.array([0, cols-1]) # Create array of column indices
-    pix_rows = np.array([0, rows-1]) # Create array of row indices
-    pix_rows, pix_cols = np.meshgrid(pix_rows, pix_cols) # Create grid arrays that we can stack together
-    pixAll = np.dstack([pix_rows.flat, pix_cols.flat])[0] # Stack arrays to get final map of pix pixel coordinats [[row1, col1], [row2, col1], [row1, col2], [row2, col2]...]
+#     #################################
+#     # Prepare pixel (pix) coordinates
+#     ## Pix coordinates describe the size of the coordinates in pixels
+#     ## Coordinate Order
+#     ## top left of dat == port(range, 0)
+#     ## bot left of dat == star(range, 0)
+#     ## top next == port(range, 0+filt)
+#     ## bottom next == star(range, 0+filt)
+#     ## ....
+#     rows, cols = label.shape # Determine number rows/cols
+#     pix_cols = np.array([0, cols-1]) # Create array of column indices
+#     pix_rows = np.array([0, rows-1]) # Create array of row indices
+#     pix_rows, pix_cols = np.meshgrid(pix_rows, pix_cols) # Create grid arrays that we can stack together
+#     pixAll = np.dstack([pix_rows.flat, pix_cols.flat])[0] # Stack arrays to get final map of pix pixel coordinats [[row1, col1], [row2, col1], [row1, col2], [row2, col2]...]
 
-    #######################################
-    # Prepare destination (dst) coordinates
-    ## Destination coordinates describe the geographic location in lat/lon
-    ## or easting/northing that directly map to the pix coordinates.
+#     #######################################
+#     # Prepare destination (dst) coordinates
+#     ## Destination coordinates describe the geographic location in lat/lon
+#     ## or easting/northing that directly map to the pix coordinates.
 
-    ###
-    # Get top (port range) coordinates
-    trkMeta = pd.read_csv(portTrkMetaFile)
-    trkMeta = trkMeta[trkMeta['chunk_id']==chunk].reset_index(drop=False) # Filter df by chunk_id
+#     ###
+#     # Get top (port range) coordinates
+#     trkMeta = pd.read_csv(portTrkMetaFile)
+#     trkMeta = trkMeta[trkMeta['chunk_id']==chunk].reset_index(drop=False) # Filter df by chunk_id
 
-    # Get range (outer extent) coordinates [xR, yR] to transposed numpy arrays
-    xTop, yTop = trkMeta[xRange].to_numpy().T, trkMeta[yRange].to_numpy().T
-    xyTop = np.vstack((xTop, yTop)).T # Stack the arrays
+#     # Get range (outer extent) coordinates [xR, yR] to transposed numpy arrays
+#     xTop, yTop = trkMeta[xRange].to_numpy().T, trkMeta[yRange].to_numpy().T
+#     xyTop = np.vstack((xTop, yTop)).T # Stack the arrays
 
-    ###
-    # Get bottom (star range) coordinates
-    trkMeta = pd.read_csv(starTrkMetaFile)
-    trkMeta = trkMeta[trkMeta['chunk_id']==chunk].reset_index(drop=False) # Filter df by chunk_id
+#     ###
+#     # Get bottom (star range) coordinates
+#     trkMeta = pd.read_csv(starTrkMetaFile)
+#     trkMeta = trkMeta[trkMeta['chunk_id']==chunk].reset_index(drop=False) # Filter df by chunk_id
 
-    # Get range (outer extent) coordinates [xR, yR] to transposed numpy arrays
-    xBot, yBot = trkMeta[xRange].to_numpy().T, trkMeta[yRange].to_numpy().T
-    xyBot = np.vstack((xBot, yBot)).T # Stack the arrays
+#     # Get range (outer extent) coordinates [xR, yR] to transposed numpy arrays
+#     xBot, yBot = trkMeta[xRange].to_numpy().T, trkMeta[yRange].to_numpy().T
+#     xyBot = np.vstack((xBot, yBot)).T # Stack the arrays
 
-    # Stack the coordinates (port[0,0], star[0,0], port[1,1]...) following
-    ## pattern of pix coordinates
-    dstAll = np.empty([len(xyTop)+len(xyBot), 2]) # Initialize appropriately sized np array
-    dstAll[0::2] = xyTop # Add port range coordinates
-    dstAll[1::2] = xyBot # Add star range coordinates
+#     # Stack the coordinates (port[0,0], star[0,0], port[1,1]...) following
+#     ## pattern of pix coordinates
+#     dstAll = np.empty([len(xyTop)+len(xyBot), 2]) # Initialize appropriately sized np array
+#     dstAll[0::2] = xyTop # Add port range coordinates
+#     dstAll[1::2] = xyBot # Add star range coordinates
 
-    # Filter dst using previously made mask
-    dst = dstAll[mask]
+#     # Filter dst using previously made mask
+#     dst = dstAll[mask]
 
-    ########################
-    # Perform transformation
-    # PiecewiseAffineTransform
-    # tform = PiecewiseAffineTransform()
-    tform = FastPiecewiseAffineTransform()
-    tform.estimate(pixAll, dst)
+#     ########################
+#     # Perform transformation
+#     # PiecewiseAffineTransform
+#     # tform = PiecewiseAffineTransform()
+#     tform = FastPiecewiseAffineTransform()
+#     tform.estimate(pixAll, dst)
 
-    # First get the min/max values for x,y geospatial coordinates
-    x_min, y_min, x_max, y_max = df[['x_min', 'y_min', 'x_max', 'y_max']].values[0]
+#     # First get the min/max values for x,y geospatial coordinates
+#     x_min, y_min, x_max, y_max = df[['x_min', 'y_min', 'x_max', 'y_max']].values[0]
 
-    # Calculate x,y resolution of a single pixel
-    xres = (x_max - x_min) / windowSize_m
-    yres = (y_max - y_min) / windowSize_m
+#     # Calculate x,y resolution of a single pixel
+#     xres = (x_max - x_min) / windowSize_m
+#     yres = (y_max - y_min) / windowSize_m
 
-    # Calculate transformation matrix by providing geographic coordinates
-    ## of upper left corner of the image and the pixel size
-    transform = from_origin(x_min - xres/2, y_max - yres/2, xres, yres)
+#     # Calculate transformation matrix by providing geographic coordinates
+#     ## of upper left corner of the image and the pixel size
+#     transform = from_origin(x_min - xres/2, y_max - yres/2, xres, yres)
 
-    # Warp image from the input shape to output shape
-    out = warp(label.T,
-                tform.inverse,
-                output_shape=(windowSize_m, windowSize_m),
-                mode='constant',
-                cval=np.nan,
-                clip=False,
-                preserve_range=True)
+#     # Warp image from the input shape to output shape
+#     out = warp(label.T,
+#                 tform.inverse,
+#                 output_shape=(windowSize_m, windowSize_m),
+#                 mode='constant',
+#                 cval=np.nan,
+#                 clip=False,
+#                 preserve_range=True)
 
-    # Rotate 180 and flip
-    # https://stackoverflow.com/questions/47930428/how-to-rotate-an-array-by-%C2%B1-180-in-an-efficient-way
-    out = np.flip(np.flip(np.flip(out,1),0),1).astype('uint8')
+#     # Rotate 180 and flip
+#     # https://stackoverflow.com/questions/47930428/how-to-rotate-an-array-by-%C2%B1-180-in-an-efficient-way
+#     out = np.flip(np.flip(np.flip(out,1),0),1).astype('uint8')
 
-    # Prepare colors
-    class_colormap = {0: '#3366CC',
-                        1: '#DC3912',
-                        2: '#FF9900',
-                        3: '#109618',
-                        4: '#990099', 
-                        5: '#0099C6',
-                        6: '#DD4477',
-                        7: '#66AA00',
-                        8: '#B82E2E'}
+#     # Prepare colors
+#     class_colormap = {0: '#3366CC',
+#                         1: '#DC3912',
+#                         2: '#FF9900',
+#                         3: '#109618',
+#                         4: '#990099', 
+#                         5: '#0099C6',
+#                         6: '#DD4477',
+#                         7: '#66AA00',
+#                         8: '#B82E2E'}
     
-    for k, v in class_colormap.items():
-        rgb = ImageColor.getcolor(v, 'RGB')
-        class_colormap[k] = rgb
+#     for k, v in class_colormap.items():
+#         rgb = ImageColor.getcolor(v, 'RGB')
+#         class_colormap[k] = rgb
 
-    # Prepare output file name
-    npz_name = os.path.splitext(os.path.basename(df['npz'].values[0]))[0]
-    if outName:
-        gtiff = os.path.join(out_dir, f"{outName}_{npz_name}_{windowSize_m[0]}m.tif")
-    else:
-        gtiff = os.path.join(out_dir, f"{npz_name}_{windowSize_m[0]}m.tif")
+#     # Prepare output file name
+#     npz_name = os.path.splitext(os.path.basename(df['npz'].values[0]))[0]
+#     if outName:
+#         gtiff = os.path.join(out_dir, f"{outName}_{npz_name}_{windowSize_m[0]}m.tif")
+#     else:
+#         gtiff = os.path.join(out_dir, f"{npz_name}_{windowSize_m[0]}m.tif")
 
-    print(gtiff)
+#     print(gtiff)
 
-    # Export georectified image
-    with rio.open(
-        gtiff,
-        'w',
-        driver='GTiff',
-        height=out.shape[0],
-        width=out.shape[1],
-        count=1,
-        dtype=out.dtype,
-        crs=epsg,
-        transform=transform,
-        compress='lzw'
-        ) as dst:
-            dst.nodata=0
-            dst.write(out,1)
-            dst.write_colormap(1, class_colormap)
-            dst=None
+#     # Export georectified image
+#     with rio.open(
+#         gtiff,
+#         'w',
+#         driver='GTiff',
+#         height=out.shape[0],
+#         width=out.shape[1],
+#         count=1,
+#         dtype=out.dtype,
+#         crs=epsg,
+#         transform=transform,
+#         compress='lzw'
+#         ) as dst:
+#             dst.nodata=0
+#             dst.write(out,1)
+#             dst.write_colormap(1, class_colormap)
+#             dst=None
     
-    print('yep')
+#     print('yep')
 
 #========================================================
 def map_npzs(df: pd.DataFrame, in_dir: str, out_dir: str, outName: str, windowSize_m: tuple, epsg: int):
@@ -890,10 +1045,47 @@ def map_npzs(df: pd.DataFrame, in_dir: str, out_dir: str, outName: str, windowSi
 
     # r.to_file(out_shp, driver='ESRI Shapefile')
 
-    r = Parallel(n_jobs=-1, verbose=10)(
-        delayed(label_array_to_raster)(df, in_dir, out_dir, outName, windowSize_m, epsg)
-        for idx, win in tqdm(df.iterrows(), total=len(df), desc="Processing windows")
-        )
+    # r = Parallel(n_jobs=-1, verbose=10)(
+    #     delayed(label_array_to_raster)(df, in_dir, out_dir, outName, windowSize_m, epsg)
+    #     for idx, win in tqdm(df.iterrows(), total=len(df), desc="Processing windows")
+    #     )
+
+    # Drop rows with null geometry
+    df = df[~df['geometry'].isnull()].reset_index(drop=True)
+
+    # Drop geometry column
+    df = df.drop(columns=['geometry'])
+
+    # r = Parallel(n_jobs=-1, verbose=10)(
+    #     delayed(label_array_to_raster)(df.iloc[idx], out_dir, outName, windowSize_m, epsg)
+    #     for idx, win in tqdm(df.iterrows(), total=len(df), desc="Processing windows")
+    #     )
+
+    # Create valid geometry column in dataframe from xmin, ymin, xmax, ymax
+    def _make_geom_from_bounds(row):
+        try:
+            xmin = float(row['x_min'])
+            ymin = float(row['y_min'])
+            xmax = float(row['x_max'])
+            ymax = float(row['y_max'])
+            # ignore degenerate boxes
+            if xmin >= xmax or ymin >= ymax:
+                return None
+            return box(xmin, ymin, xmax, ymax)
+        except Exception:
+            return None
+
+    # build geometry column and drop invalid rows
+    df['geometry'] = df.apply(_make_geom_from_bounds, axis=1)
+
+    # convert to GeoDataFrame with provided epsg
+    df = gpd.GeoDataFrame(df, geometry='geometry', crs=f"EPSG:{epsg}")
+    
+    # Export labels to geotiffs in parallel
+    for idx, row in tqdm(df.iterrows(), total=len(df), desc="Mapping npz files"):
+        label_array_to_raster(row, out_dir, outName, windowSize_m, epsg)
+
+    return df
     
 
 # =========================================================
@@ -914,6 +1106,41 @@ class FastPiecewiseAffineTransform(PiecewiseAffineTransform):
 
         return result        
 
+#========================================================
+def mosaic_maps(
+        imgsToMosaic,
+        outDir,
+        outName,
+        overview=True,
+        bands=[1]
+        ):
+    
+    resampleAlg = 'nearest'
+    
+    outVRT = os.path.join(outDir, outName+'.vrt')
+    outTIF = outVRT.replace('.vrt', '.tif')
+
+    # First built a vrt
+    vrt_options = gdal.BuildVRTOptions(resampleAlg=resampleAlg, bandList = bands)
+    gdal.BuildVRT(outVRT, imgsToMosaic, options=vrt_options)
+
+    # Create GeoTiff from vrt
+    ds = gdal.Open(outVRT)
+
+    kwargs = {'format': 'GTiff',
+                'creationOptions': ['NUM_THREADS=ALL_CPUS', 'COMPRESS=LZW', 'TILED=YES']
+                }
+    
+    # Create geotiff
+    gdal.Translate(outTIF, ds, **kwargs)
+
+    # Generate overviews
+    if overview:
+        dest = gdal.Open(outTIF, 1)
+        gdal.SetConfigOption('COMPRESS_OVERVIEW', 'DEFLATE')
+        dest.BuildOverviews('nearest', [2 ** j for j in range(1,10)])
+
+    os.remove(outVRT) # Remove vrt
 
 
 #========================================================
