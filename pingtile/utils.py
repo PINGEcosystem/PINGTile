@@ -5,7 +5,7 @@ Copyright (c) 2025 Cameron S. Bodine
 #########
 # Imports
 import os, sys
-from osgeo import gdal
+from osgeo import gdal, ogr, osr
 import rasterio as rio
 from rasterio.mask import mask
 from rasterio.warp import calculate_default_transform, reproject, Resampling
@@ -20,6 +20,7 @@ from tqdm import tqdm
 from shapely.geometry import box, shape
 from PIL import ImageColor, Image
 import cv2
+import json
 
 from skimage.io import imsave, imread
 import matplotlib.pyplot as plt
@@ -494,7 +495,7 @@ def doMovWin(i: int,
                         fileName = f"{outName}_{mosaicName}_{windowSize[0]}m_{win_coords}"
                     else:
                         fileName = f"{mosaicName}_{windowSize[0]}m_{win_coords}"
-                    out_raster_path = os.path.join(outSonDir, 'images', f"{fileName}.png")
+                    out_raster_path = os.path.join(outSonDir, f"{fileName}.png")
                     
                     with rio.open(
                         out_raster_path,
@@ -718,7 +719,8 @@ def avg_npz_files(df: pd.DataFrame,
                   outName: str,
                   windowSize_m: tuple,
                   stride: int,
-                  epsg: int):
+                  epsg: int,
+                  threadCnt: int=4):
     '''
     Average overlapping npz files
     '''
@@ -739,7 +741,7 @@ def avg_npz_files(df: pd.DataFrame,
     arr_shape = sample_npz['softmax'].shape
 
     # Use joblib to parallelize the averaging process
-    results = Parallel(n_jobs=-1, verbose=10)(
+    results = Parallel(n_jobs=threadCnt, verbose=10)(
         delayed(avg_npz_files_batch)(df, win, arr_shape, in_dir, out_dir, outName, windowSize_m, epsg)
         for idx, win in tqdm(movWin.iterrows(), total=len(movWin), desc="Processing windows")
     )
@@ -1016,7 +1018,13 @@ def label_array_to_raster(df, out_dir: str, outName: str, windowSize_m: tuple, e
 #     print('yep')
 
 #========================================================
-def map_npzs(df: pd.DataFrame, in_dir: str, out_dir: str, outName: str, windowSize_m: tuple, epsg: int):
+def map_npzs(df: pd.DataFrame, 
+             in_dir: str, 
+             out_dir: str, 
+             outName: str, 
+             windowSize_m: tuple, 
+             epsg: int,
+             threadCnt: int=4):
 
     '''
     '''
@@ -1082,8 +1090,11 @@ def map_npzs(df: pd.DataFrame, in_dir: str, out_dir: str, outName: str, windowSi
     df = gpd.GeoDataFrame(df, geometry='geometry', crs=f"EPSG:{epsg}")
     
     # Export labels to geotiffs in parallel
-    for idx, row in tqdm(df.iterrows(), total=len(df), desc="Mapping npz files"):
-        label_array_to_raster(row, out_dir, outName, windowSize_m, epsg)
+    # for idx, row in tqdm(df.iterrows(), total=len(df), desc="Mapping npz files"):
+    #     label_array_to_raster(row, out_dir, outName, windowSize_m, epsg)
+
+    total_maps = len(df)
+    _ = Parallel(n_jobs=threadCnt)(delayed(label_array_to_raster)(df.iloc[i], out_dir, outName, windowSize_m, epsg) for i in tqdm(range(total_maps)))
 
     return df
     
@@ -1114,15 +1125,11 @@ def mosaic_maps(
         overview=True,
         bands=[1]
         ):
-    
-    resampleAlg = 'nearest'
-    
-    outVRT = os.path.join(outDir, outName+'.vrt')
-    outTIF = outVRT.replace('.vrt', '.tif')
 
-    # First built a vrt
-    vrt_options = gdal.BuildVRTOptions(resampleAlg=resampleAlg, bandList = bands)
-    gdal.BuildVRT(outVRT, imgsToMosaic, options=vrt_options)
+    # Create vrt
+    outVRT = create_vrt(imgsToMosaic=imgsToMosaic, outDir=outDir, outName=outName, bands=bands)
+
+    outTIF = outVRT.replace('.vrt', '.tif')
 
     # Create GeoTiff from vrt
     ds = gdal.Open(outVRT)
@@ -1141,6 +1148,110 @@ def mosaic_maps(
         dest.BuildOverviews('nearest', [2 ** j for j in range(1,10)])
 
     os.remove(outVRT) # Remove vrt
+
+#========================================================
+def maps2Shp(map_files: list, 
+             outDir: str,
+             outName: str,
+             configFile: str,
+             bands: list=[1]):
+
+
+    # Create vrt
+    outVRT = create_vrt(imgsToMosaic=map_files, outDir=outDir, outName=outName, bands=bands)
+
+    # Get class names from json
+    # Open model configuration file
+    with open(configFile) as file:
+        config = json.load(file)
+    globals().update(config)
+
+    # https://gis.stackexchange.com/questions/340284/converting-raster-pixels-to-polygons-with-gdal-python
+    # Open raster
+    src_ds = gdal.Open(outVRT)
+
+
+    ####################
+    # Polygon Conversion
+    # Set spatial reference
+    srs = osr.SpatialReference()
+    srs.ImportFromWkt(src_ds.GetProjection())
+
+    # Prepare layerfile
+    dst_layername = os.path.basename(outVRT).replace('.vrt', '')
+    dst_layername = dst_layername.replace('_raster_mosaic', '')
+    dst_layername = os.path.join(outDir, dst_layername)
+
+    srcband = src_ds.GetRasterBand(1)
+    drv = ogr.GetDriverByName("ESRI Shapefile")
+    dst_ds = drv.CreateDataSource(dst_layername+'.shp')
+    dst_layer = dst_ds.CreateLayer(dst_layername, srs = srs, geom_type=ogr.wkbMultiPolygon)
+    newField = ogr.FieldDefn('Substrate', ogr.OFTReal)
+    dst_layer.CreateField(newField)
+    gdal.Polygonize(srcband, None, dst_layer, 0, [], callback=None)
+
+    # Set substrate name
+    newField = ogr.FieldDefn('Name', ogr.OFTString)
+    newField.SetWidth(20)
+    dst_layer.CreateField(newField)
+
+    for feature in dst_layer:
+        subID = str(int(feature.GetField('Substrate')))
+        subName = MY_CLASS_NAMES[subID]
+        feature.SetField('Name', subName)
+        dst_layer.SetFeature(feature)
+
+    # Calculate Area
+    # https://gis.stackexchange.com/questions/169186/calculate-area-of-polygons-using-ogr-in-python-script
+    # Create field to store area
+    newField = ogr.FieldDefn('Area_m', ogr.OFTReal)
+    newField.SetWidth(32)
+    newField.SetPrecision(2)
+    dst_layer.CreateField(newField)
+
+    # Calculate Area
+    for feature in dst_layer:
+        geom = feature.GetGeometryRef()
+        area = geom.GetArea()
+        feature.SetField("Area_m", area)
+        dst_layer.SetFeature(feature)
+
+    # Delete NoData Polygon
+    # https://gis.stackexchange.com/questions/254444/deleting-selected-features-from-vector-ogr-in-gdal-python
+    layer = dst_ds.GetLayer()
+    layer.SetAttributeFilter("Substrate = 0")
+
+    for feat in layer:
+        layer.DeleteFeature(feat.GetFID())
+
+
+    dst_ds.SyncToDisk()
+    dst_ds=None
+
+    return
+
+#========================================================
+def create_vrt(imgsToMosaic: list,
+               outDir: str,
+               outName: str,
+               bands: list):
+
+
+    resampleAlg = 'nearest'
+    
+    outVRT = os.path.join(outDir, outName+'.vrt')
+
+    # First built a vrt
+    vrt_options = gdal.BuildVRTOptions(resampleAlg=resampleAlg, bandList = bands)
+    gdal.BuildVRT(outVRT, imgsToMosaic, options=vrt_options)
+
+    return outVRT
+
+#========================================================
+def create_mask():
+
+
+    return
 
 
 #========================================================
