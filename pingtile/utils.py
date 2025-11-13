@@ -324,6 +324,26 @@ def doMovWin_imgshp(i: int,
                 # Mask the habitat map
                 clipped_raster_resized = (clipped_raster_resized * clipped_raster_mask).astype('uint8')
 
+                lowercase_keys = [k.lower() for k in classCrossWalk.keys()]
+                if 'shadow' in lowercase_keys:
+
+                    ## Start shadow processing ##
+
+                    # Make habitat map mask - areas with no habitat get shadow class
+                    habitat_map_mask = np.where(clipped_raster_resized > 0, 0, 1).astype('uint8')
+
+                    # Set the shadow value from the class crosswalk and set as uint8
+                    shadow_value = np.uint8(classCrossWalk['Shadow'])
+
+                    # Apply shadow value to habitat map where habitat map mask is 1
+                    clipped_raster_resized = np.where(habitat_map_mask == 1, shadow_value, clipped_raster_resized)
+
+                    # Apply mask the habitat map again
+                    clipped_raster_resized = (clipped_raster_resized * clipped_raster_mask).astype('uint8')
+                    
+                    # End shadow processing ##
+
+
                 # Save the rasterized habitat map
                 out_rasterized_path = os.path.join(outMaskDir, f"{fileName}.png")
                 with rio.open(
