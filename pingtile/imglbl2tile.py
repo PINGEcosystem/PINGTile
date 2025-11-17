@@ -9,6 +9,7 @@ Copyright (c) 2025 Cameron S. Bodine
 import os, sys
 from joblib import Parallel, delayed
 from tqdm import tqdm
+import rasterio as rio
 
 # # Debug
 # from utils import reproject_raster, getMovingWindow_rast, doMovWin, reproject_shp, doMovWin_imgshp
@@ -48,11 +49,48 @@ def doImgLbl2tile(inFileSonar: str,
     # Get the moving window
     movWin = getMovingWindow_rast(sonRast=sonar_reproj, windowSize=windowSize, windowStride_m=windowStride_m)
 
+    # # Subset movWin gdf to those that intersect mask_reproj (mosaic geotiff)
+    # # For raster: create polygon from non-nodata pixels
+    # with rio.open(mask_reproj) as src:
+    #     # Read first band
+    #     data = src.read(1)
+    #     # Create mask of valid (non-nodata) pixels
+    #     if src.nodata is not None:
+    #         valid_mask = data != src.nodata
+    #     else:
+    #         # If no nodata value, assume 0 or NaN are invalid
+    #         valid_mask = (data != 0) & ~np.isnan(data)
+        
+    #     # Extract shapes (polygons) from valid data regions
+    #     shapes_gen = features.shapes(valid_mask.astype('uint8'), mask=valid_mask, transform=src.transform)
+        
+    #     # Collect all valid data polygons
+    #     geoms = [shape(geom) for geom, val in shapes_gen if val == 1]
+        
+    #     if geoms:
+    #         # Combine all valid data polygons into one geometry
+    #         from shapely.ops import unary_union
+    #         data_footprint = unary_union(geoms)
+            
+    #         # Ensure same CRS
+    #         if movWin.crs != src.crs:
+    #             footprint_gdf = gpd.GeoDataFrame([1], geometry=[data_footprint], crs=src.crs)
+    #             footprint_gdf = footprint_gdf.to_crs(movWin.crs)
+    #             data_footprint = footprint_gdf.geometry.iloc[0]
+            
+    #         # Filter windows that intersect the actual data footprint
+    #         movWin = movWin[movWin.intersects(data_footprint)]
+    #     else:
+    #         # No valid data found
+    #         movWin = movWin.iloc[0:0]  # empty GeoDataFrame
+
     # # save to file
     # outFile = os.path.join(outDir, 'movWin.shp')
     # movWin.to_file(outFile, driver='ESRI Shapefile')
 
-    # print(movWin)
+    # # print(movWin)
+
+    # sys.exit()
 
     ##################
     # Do moving window

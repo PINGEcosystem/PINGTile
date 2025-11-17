@@ -10,6 +10,10 @@ import sys, os
 from joblib import Parallel, delayed
 from tqdm import tqdm
 import pandas as pd
+import rasterio as rio
+from shapely.ops import unary_union
+from shapely.geometry import shape, box
+import geopandas as gpd
 
 from pingtile.utils import reproject_raster, getMovingWindow_rast, doMovWin
 
@@ -37,6 +41,52 @@ def doMosaic2tile(inFile: str,
         
     # Get the moving window
     movWin = getMovingWindow_rast(sonRast=mosaic_reproj, windowSize=windowSize, windowStride_m=windowStride_m)
+
+    # # Subset movWin gdf to those that intersect mask_reproj (mosaic geotiff)
+    # # For raster: create polygon from non-nodata pixels
+    # with rio.open(mosaic_reproj) as src:
+    #     # Read first band
+    #     data = src.read(1)
+    #     # Create mask of valid (non-nodata) pixels
+    #     if src.nodata is not None:
+    #         valid_mask = data != src.nodata
+    #     else:
+    #         # If no nodata value, assume 0 or NaN are invalid
+    #         valid_mask = (data != 0) & ~np.isnan(data)
+
+    #     # Set valid values to 1, invalid to 0
+    #     valid_mask = valid_mask.astype('uint8')
+    #     valid_mask[valid_mask >= 1] = 1
+        
+    #     # Extract shapes (polygons) from valid data regions
+    #     shapes_gen = rio.features.shapes(valid_mask.astype('uint8'), mask=valid_mask, transform=src.transform)
+        
+    #     # Collect all valid data polygons
+    #     geoms = [shape(geom) for geom, val in shapes_gen if val == 1]
+        
+    #     if geoms:
+    #         # Combine all valid data polygons into one geometry
+    #         data_footprint = unary_union(geoms)
+            
+    #         # Ensure same CRS
+    #         if movWin.crs != src.crs:
+    #             footprint_gdf = gpd.GeoDataFrame([1], geometry=[data_footprint], crs=src.crs)
+    #             footprint_gdf = footprint_gdf.to_crs(movWin.crs)
+    #             data_footprint = footprint_gdf.geometry.iloc[0]
+            
+    #         # Filter windows that intersect the actual data footprint
+    #         movWin = movWin[movWin.intersects(data_footprint)]
+    #     else:
+    #         # No valid data found
+    #         movWin = movWin.iloc[0:0]  # empty GeoDataFrame
+
+    # # save to file
+    # outFile = os.path.join(outDir, 'movWin.shp')
+    # movWin.to_file(outFile, driver='ESRI Shapefile')
+
+    # # print(movWin)
+
+    # sys.exit()
 
     # Debug save geodataframe to shp
     out_file = os.path.join(outDir, 'mov_win.shp')
