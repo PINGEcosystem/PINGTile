@@ -35,9 +35,9 @@ classCrossWalk = {
     'Bedrock With Fine Substrate Cover':2,
     'Bedrock With Coarse Substrate Cover':2,
     'Gravels':3,
-    'Gravel and Sand Mix':4,
+    'Gravel And Sand Mix':4,
     'Sands':5,
-    'Sand and Mud Mix':6,
+    'Sand And Mud Mix':6,
     'Muds':7,
 }
 

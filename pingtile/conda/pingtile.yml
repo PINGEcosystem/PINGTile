@@ -15,6 +15,7 @@ dependencies:
   - tqdm
   - matplotlib
   - scikit-image
+  - pip
   - pip:
     - pinginstaller
     - pingtile
