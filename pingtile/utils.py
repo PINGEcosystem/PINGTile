@@ -26,62 +26,167 @@ from skimage.io import imsave, imread
 import matplotlib.pyplot as plt
 
 #========================================================
-def reproject_raster(src_path: str, 
-                     dst_path: str, 
-                     dst_crs: str):
+# def reproject_raster(src_path: str, 
+#                      dst_path: str, 
+#                      dst_crs: str):
+
+#     file_name = os.path.basename(src_path)
+#     file_type = file_name.split('.')[-1]
+#     out_file = file_name.replace('.'+file_type, '_reproj.tif')
+#     dst_path = os.path.join(dst_path, out_file)
+
+#     if os.path.exists(dst_path):
+#         try:
+#             os.remove(dst_path)
+#         except:
+#             pass
+    
+#     cell_size = 0.05
+
+#     dst_tmp = dst_path.replace('.tif', '_tmp.tif')
+
+#     with rio.open(src_path) as src:
+#         transform, width, height = calculate_default_transform(
+#             src.crs, dst_crs, src.width, src.height, *src.bounds)
+#         kwargs = src.meta.copy()
+#         kwargs.update({
+#             'crs': dst_crs,
+#             'transform': transform,
+#             'width': width,
+#             'height': height,
+#             'count': 1,  # Ensure single band
+#             'dtype': 'uint8'  # Greyscale
+#         })
+
+#         src_crs = int(str(src.crs).split(':')[-1])
+
+#         if src_crs == dst_crs:
+#             return src_path
+
+#         with rio.open(dst_tmp, 'w', **kwargs) as dst:
+#             reproject(
+#                 source = rio.band(src, 1),
+#                 destination=rio.band(dst, 1),
+#                 src_transform=src.transform,
+#                 src_crs=src.crs,
+#                 dst_transform=transform,
+#                 dst_crs=dst_crs,
+#                 resampling=Resampling.nearest if src_path.endswith('.png') else Resampling.bilinear,
+#                 dst_nodata=src.nodata
+#             )
+
+#     t = gdal.Warp(dst_path, dst_tmp, xRes = cell_size, yRes = cell_size, targetAlignedPixels=True)
+
+#     t = None
+
+#     os.remove(dst_tmp)
+
+#     return dst_path
+
+def reproject_raster(src_path: str,
+                     dst_path: str,
+                     dst_crs: str,
+                     cell_size: float = 0.05,
+                     max_pixels: int = 250_000_000):
+    """
+    Reproject a raster to dst_crs, force single-band grayscale, apply target cell_size.
+    Guards against enormous target sizes that can hang.
+    """
+    import shutil
+    dst_epsg_int = int(str(dst_crs).split(':')[-1]) if isinstance(dst_crs, str) else int(dst_crs)
+    dst_crs_str = f"EPSG:{dst_epsg_int}"
 
     file_name = os.path.basename(src_path)
-    file_type = file_name.split('.')[-1]
-    out_file = file_name.replace('.'+file_type, '_reproj.tif')
-    dst_path = os.path.join(dst_path, out_file)
+    base, _ext = os.path.splitext(file_name)
+    out_file = f"{base}_reproj.tif"
+    out_dir = dst_path
+    out_path = os.path.join(out_dir, out_file)
 
-    if os.path.exists(dst_path):
-        try:
-            os.remove(dst_path)
-        except:
-            pass
-    
-    cell_size = 0.05
+    if os.path.exists(out_path):
+        return out_path
 
-    dst_tmp = dst_path.replace('.tif', '_tmp.tif')
+    os.makedirs(out_dir, exist_ok=True)
 
     with rio.open(src_path) as src:
+        src_epsg_int = int(str(src.crs).split(':')[-1])
+        already_single = (src.count == 1)
+        same_crs = (src_epsg_int == dst_epsg_int)
+
+        # Fast path: just copy to new name to keep naming consistent
+        if same_crs and already_single:
+            shutil.copy2(src_path, out_path)
+            return out_path
+
+        # Read needed bands only
+        if src.count >= 3:
+            r = src.read(1, out_dtype='float32')
+            g = src.read(2, out_dtype='float32')
+            b = src.read(3, out_dtype='float32')
+            data = (0.299 * r + 0.587 * g + 0.114 * b)
+        else:
+            data = src.read(1)
+
+        # Scale to uint8
+        if data.dtype != np.uint8:
+            dmin = float(np.nanmin(data))
+            dmax = float(np.nanmax(data))
+            if dmax > dmin:
+                data = ((data - dmin) / (dmax - dmin) * 255.0).astype('uint8')
+            else:
+                data = np.zeros_like(data, dtype='uint8')
+
+        # Compute target transform/size with desired resolution
         transform, width, height = calculate_default_transform(
-            src.crs, dst_crs, src.width, src.height, *src.bounds)
-        kwargs = src.meta.copy()
-        kwargs.update({
-            'crs': dst_crs,
-            'transform': transform,
-            'width': width,
-            'height': height,
-            'count': 1,  # Ensure single band
-            'dtype': 'uint8'  # Greyscale
-        })
+            src.crs, dst_crs_str, src.width, src.height, *src.bounds, resolution=cell_size
+        )
 
-        src_crs = int(str(src.crs).split(':')[-1])
+        est_pixels = width * height
+        if est_pixels > max_pixels:
+            # Downscale factor (sqrt to keep aspect)
+            scale = (max_pixels / est_pixels) ** 0.5
+            width2 = max(1, int(width * scale))
+            height2 = max(1, int(height * scale))
+            print(f"[reproject_raster] Warning: target size {width}x{height} too large "
+                  f"({est_pixels} px). Downsampling to {width2}x{height2}.")
+            width, height = width2, height2
+            # Adjust transform (pixel size increases)
+            px_w = (src.bounds[2] - src.bounds[0]) / width
+            px_h = (src.bounds[3] - src.bounds[1]) / height
+            transform = rio.transform.from_origin(src.bounds[0], src.bounds[3], px_w, px_h)
 
-        if src_crs == dst_crs:
-            return src_path
+        profile = {
+            "driver": "GTiff",
+            "height": height,
+            "width": width,
+            "count": 1,
+            "dtype": "uint8",
+            "crs": dst_crs_str,
+            "transform": transform,
+            "compress": "LZW"
+        }
 
-        with rio.open(dst_tmp, 'w', **kwargs) as dst:
-            reproject(
-                source = rio.band(src, 1),
-                destination=rio.band(dst, 1),
-                src_transform=src.transform,
-                src_crs=src.crs,
-                dst_transform=transform,
-                dst_crs=dst_crs,
-                resampling=Resampling.nearest if src_path.endswith('.png') else Resampling.bilinear,
-                dst_nodata=src.nodata
-            )
+        dest = np.zeros((height, width), dtype='uint8')
 
-    t = gdal.Warp(dst_path, dst_tmp, xRes = cell_size, yRes = cell_size, targetAlignedPixels=True)
+        print(f"[reproject_raster] Reprojecting {file_name} -> {out_file} "
+              f"(src:{src.width}x{src.height} -> dst:{width}x{height}, cell:{cell_size})")
 
-    t = None
+        reproject(
+            source=data,
+            destination=dest,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=transform,
+            dst_crs=dst_crs_str,
+            resampling=Resampling.nearest,
+            dst_nodata=0
+        )
 
-    os.remove(dst_tmp)
+    with rio.open(out_path, 'w', **profile) as dst:
+        dst.write(dest, 1)
+        dst.nodata = 0
 
-    return dst_path
+    print(f"[reproject_raster] Done: {out_path}")
+    return out_path
 
 #========================================================
 

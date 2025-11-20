@@ -23,32 +23,36 @@ import json
 ############
 # Parameters
 
-map = r'Z:\tmp\pingtile_test\map\Model_Training_Substrate_Polygons_Export.shp'
-sonarDir = r'Z:\tmp\pingtile_test\mosaic'
+map = r"D:\scratch\Delaware_Catherine_Test\SHPS_FromGIS\N_2013_Line4_forPINGTile.shp"
+sonarDir = r"D:\scratch\Delaware_Catherine_Test\sonar"
 
-outDirTop = r'Z:\tmp\pingtile_test'
-outName = 'Hudson'
+outDirTop = r'D:\scratch\Delaware_Catherine_Test'
+outName = 'Delaware_test'
 
 classCrossWalk = {
-    '0':0,
-    'U':1,
-    'G':2,
-    'B_C':3,
-    'B':4
+    'X':0,
+    'Exposed Bedrock':1,
+    'Bedrock With Fine Substrate Cover':2,
+    'Bedrock With Coarse Substrate Cover':2,
+    'Gravels':3,
+    'Gravel and Sand Mix':4,
+    'Sands':5,
+    'Sand and Mud Mix':6,
+    'Muds':7,
 }
 
 windowSize_m = [
-                (12,12),
-                (18,18),
+                # (12,12),
+                # (18,18),
                 (24,24),
                 ]
 
-windowStride = 3
-classFieldName = 'Substrate_'
-minArea_percent = 0.5
+windowStride = 12
+classFieldName = 'CMECSClass'
+minArea_percent = 0.75
 target_size = (512, 512) #(1024, 1024)
 threadCnt = 0.75
-epsg_out = 32616
+epsg_out = 32618
 doPlot = True
 lbl2COCO = True
 
@@ -86,42 +90,44 @@ for root, dirs, files in os.walk(sonarDir):
         if file.lower().endswith('.tif') or file.lower().endswith('.tiff'):
             sonarFiles.append(os.path.join(root, file))
 
+print(f"Found {len(sonarFiles)} sonar files for processing.")
 
-# for windowSize in windowSize_m:
 
-#     # windowStride_m = windowStride*windowSize[0]
-#     windowStride_m = windowStride
-#     # minArea = minArea_percent * windowSize[0]*windowSize[1]
+for windowSize in windowSize_m:
 
-#     dirName = f"{windowSize[0]}_{windowSize[0]}"
-#     outDir = os.path.join(outDirTop, dirName)
-#     outSonDir = os.path.join(outDir, 'images')
-#     outMaskDir = os.path.join(outDir,'labels')
-#     pltDir = os.path.join(outDir,'plots')
+    # windowStride_m = windowStride*windowSize[0]
+    windowStride_m = windowStride
+    # minArea = minArea_percent * windowSize[0]*windowSize[1]
 
-#     if not os.path.exists(outSonDir):
-#         os.makedirs(outSonDir)
-#         os.makedirs(outMaskDir)
-#         os.makedirs(pltDir)
+    dirName = f"{windowSize[0]}_{windowSize[0]}"
+    outDir = os.path.join(outDirTop, dirName)
+    outSonDir = os.path.join(outDir, 'images')
+    outMaskDir = os.path.join(outDir,'labels')
+    pltDir = os.path.join(outDir,'plots')
 
-#     for sonarFile in sonarFiles:
+    if not os.path.exists(outSonDir):
+        os.makedirs(outSonDir)
+        os.makedirs(outMaskDir)
+        os.makedirs(pltDir)
 
-#         print(f"\nProcessing {os.path.basename(sonarFile)} with windowSize: {windowSize} and windowStride_m: {windowStride_m}...\n")
+    for sonarFile in sonarFiles:
 
-#         doImgLbl2tile(inFileSonar=sonarFile,
-#                       inFileMask=map,
-#                       outDir=outDir,
-#                       outName=outName,
-#                       epsg_out=epsg_out,
-#                       classCrossWalk=classCrossWalk,
-#                       windowSize=windowSize,
-#                       windowStride_m=windowStride_m,
-#                       classFieldName=classFieldName,
-#                       minArea_percent=minArea_percent,
-#                       target_size=target_size,
-#                       threadCnt=threadCnt,
-#                       doPlot=doPlot
-#                       )
+        print(f"\nProcessing {os.path.basename(sonarFile)} with windowSize: {windowSize} and windowStride_m: {windowStride_m}...\n")
+
+        doImgLbl2tile(inFileSonar=sonarFile,
+                      inFileMask=map,
+                      outDir=outDir,
+                      outName=outName,
+                      epsg_out=epsg_out,
+                      classCrossWalk=classCrossWalk,
+                      windowSize=windowSize,
+                      windowStride_m=windowStride_m,
+                      classFieldName=classFieldName,
+                      minArea_percent=minArea_percent,
+                      target_size=target_size,
+                      threadCnt=threadCnt,
+                      doPlot=doPlot
+                      )
 
 # Convert masks to COCO format
 if lbl2COCO:
