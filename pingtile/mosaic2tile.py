@@ -15,7 +15,7 @@ from shapely.ops import unary_union
 from shapely.geometry import shape, box
 import geopandas as gpd
 
-from pingtile.utils import reproject_raster, getMovingWindow_rast, doMovWin
+from pingtile.utils import reproject_raster, getMovingWindow_rast, doMovWin, getMaskFootprint
 
 #=======================================================================
 def doMosaic2tile(inFile: str,
@@ -41,6 +41,17 @@ def doMosaic2tile(inFile: str,
         
     # Get the moving window
     movWin = getMovingWindow_rast(sonRast=mosaic_reproj, windowSize=windowSize, windowStride_m=windowStride_m)
+
+    ########################
+    # Optimize moving window 
+    # ## by subsetting to only those that intersect the mask_reproj
+
+    maskFootprint = getMaskFootprint(sonPath=sonar_reproj)
+
+    if maskFootprint is not None:
+        # Filter windows that intersect the actual data footprint
+        # Use .apply() to properly handle the geometry comparison
+        movWin = movWin[movWin.geometry.intersects(maskFootprint)].reset_index(drop=True)
 
     # # Subset movWin gdf to those that intersect mask_reproj (mosaic geotiff)
     # # For raster: create polygon from non-nodata pixels

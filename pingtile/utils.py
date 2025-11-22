@@ -300,6 +300,65 @@ def getMovingWindow(df: pd.DataFrame,
     return gdf
 
 #========================================================
+def getMaskFootprint(sonPath: str,
+                     pix_res: float=10.0):
+
+    # # Open the mask file
+    # with rio.open(maskPath) as src:
+
+    #     # Resize for faster processing if large
+
+    # Get filname
+    fileName = os.path.basename(sonPath)
+    f_out = sonPath.replace('.tif', '_footprint.tif')
+
+    # Get output path
+    outDir = os.path.dirname(sonPath)
+    # Resize with gdal
+    t = gdal.Warp(f_out, sonPath, xRes = pix_res, yRes = pix_res, targetAlignedPixels=True)
+    t = None
+
+    # Read resized raster
+    with rio.open(f_out) as src:
+        data = src.read(1)
+
+        # Create mask of valid (non-nodata) pixels
+        if src.nodata is not None:
+            valid_mask = data != src.nodata
+        else:
+            # If no nodata value, assume 0 or NaN are invalid
+            valid_mask = (data != 0) & ~np.isnan(data)
+
+        # Set valid pixels to 1, others to 0
+        valid_mask = valid_mask.astype('uint8')
+
+        # Extract shapes (polygons) from valid data regions
+        shapes_gen = rio.features.shapes(valid_mask.astype('uint8'), mask=valid_mask, transform=src.transform)
+
+        # Collect all valid data polygons
+        geoms = [shape(geom) for geom, val in shapes_gen if val == 1]
+
+        if geoms:
+            # Combine all valid data polygons into one geometry
+            from shapely.ops import unary_union
+            data_footprint = unary_union(geoms)
+
+            # Create GeoDataFrame correctly - pass dict with column name
+            footprint_gdf = gpd.GeoDataFrame({'id': [1]}, geometry=[data_footprint], crs=src.crs)
+
+            # Apply a buffer of 10 meters to the footprint to ensure coverage
+            footprint_gdf['geometry'] = footprint_gdf.geometry.buffer(10)
+
+            # # Save the footprint GeoDataFrame to a file
+            # footprint_shp = os.path.join(outDir, fileName.replace('.tif', '_footprint.shp'))
+            # footprint_gdf.to_file(footprint_shp)
+
+            return footprint_gdf.geometry.iloc[0]
+        
+    return None
+
+
+#========================================================
 def doMovWin_imgshp(i: int,
                  movWin: gpd.GeoDataFrame,
                  mosaic: str,

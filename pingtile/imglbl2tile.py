@@ -11,10 +11,10 @@ from joblib import Parallel, delayed
 from tqdm import tqdm
 import rasterio as rio
 
-# # Debug
-# from utils import reproject_raster, getMovingWindow_rast, doMovWin, reproject_shp, doMovWin_imgshp
+# Debug
+from utils import reproject_raster, getMovingWindow_rast, doMovWin, reproject_shp, doMovWin_imgshp, getMaskFootprint
 
-from pingtile.utils import reproject_raster, getMovingWindow_rast, doMovWin, reproject_shp, doMovWin_imgshp
+# from pingtile.utils import reproject_raster, getMovingWindow_rast, doMovWin, reproject_shp, doMovWin_imgshp, getMaskFootprint
 
 
 #=======================================================================
@@ -48,6 +48,22 @@ def doImgLbl2tile(inFileSonar: str,
 
     # Get the moving window
     movWin = getMovingWindow_rast(sonRast=sonar_reproj, windowSize=windowSize, windowStride_m=windowStride_m)
+
+    ########################
+    # Optimize moving window 
+    # ## by subsetting to only those that intersect the mask_reproj
+
+    maskFootprint = getMaskFootprint(sonPath=sonar_reproj)
+
+    if maskFootprint is not None:
+        # Filter windows that intersect the actual data footprint
+        # Use .apply() to properly handle the geometry comparison
+        movWin = movWin[movWin.geometry.intersects(maskFootprint)].reset_index(drop=True)
+
+    # Save moving window to file for debugging
+    outFile = os.path.join(outDir, 'movWin.shp')
+    os.makedirs(outDir, exist_ok=True)
+    movWin.to_file(outFile, driver='ESRI Shapefile')
 
     # # Subset movWin gdf to those that intersect mask_reproj (mosaic geotiff)
     # # For raster: create polygon from non-nodata pixels
