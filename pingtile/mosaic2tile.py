@@ -15,7 +15,7 @@ from shapely.ops import unary_union
 from shapely.geometry import shape, box
 import geopandas as gpd
 
-from pingtile.utils import reproject_raster, getMovingWindow_rast, doMovWin, getMaskFootprint
+from pingtile.utils import reproject_raster_gray, reproject_raster_keep_bands, getMovingWindow_rast, doMovWin, getMaskFootprint
 
 #=======================================================================
 def doMosaic2tile(inFile: str,
@@ -33,8 +33,15 @@ def doMosaic2tile(inFile: str,
     Generate tiles from input mosaic.
     '''
 
+    # Check src_path band count
+    with rio.open(inFile) as src:
+        bandCnt = src.count
+
     # Reproject raster to epsg_out (if necessary)
-    mosaic_reproj = reproject_raster(src_path=inFile, dst_path=outDir, dst_crs=epsg_out)
+    if bandCnt == 3:
+        mosaic_reproj = reproject_raster_keep_bands(src_path=inFile, dst_dir=outDir, dst_crs=epsg_out)
+    else:
+        mosaic_reproj = reproject_raster_gray(src_path=inFile, dst_path=outDir, dst_crs=epsg_out)
 
     # # debug
     # mosaic_reproj = r'Z:\scratch\HabiMapper_Test\R00107_rect_wcr_mosaic_0_reproj.tif'
@@ -46,7 +53,7 @@ def doMosaic2tile(inFile: str,
     # Optimize moving window 
     # ## by subsetting to only those that intersect the mask_reproj
 
-    maskFootprint = getMaskFootprint(sonPath=sonar_reproj)
+    maskFootprint = getMaskFootprint(sonPath=mosaic_reproj)
 
     if maskFootprint is not None:
         # Filter windows that intersect the actual data footprint
