@@ -398,9 +398,12 @@ def getMaskFootprint(sonPath: str,
             # footprint_shp = os.path.join(outDir, fileName.replace('.tif', '_footprint.shp'))
             # footprint_gdf.to_file(footprint_shp)
 
-            return footprint_gdf.geometry.iloc[0]
+    if os.path.exists(f_out):
+        os.remove(f_out)
+        return footprint_gdf.geometry.iloc[0]
         
-    return None
+    else:    
+        return None
 
 
 #========================================================
@@ -939,6 +942,10 @@ def avg_npz_files_batch(df: pd.DataFrame,
     # df['geometry'] = gpd.GeoSeries.from_bounds(win_minx, win_miny, win_maxx, win_maxy, crs=f"EPSG:{epsg}").geometry
     df['geometry'] = gpd.GeoSeries([geometry], crs=f"EPSG:{epsg}")
 
+    # Cleanup files from memory
+    npz.close()
+    npz = None
+
     return df
 
 #========================================================
@@ -1054,6 +1061,12 @@ def label_array_to_raster(df, out_dir: str, outName: str, windowSize_m: tuple, e
         dst.nodata = 0
         dst.write(label, 1)
         dst.write_colormap(1, class_colormap)
+
+    # Ensure file was closed properly
+    dst.close()
+    dst = None
+    npz.close()
+    npz = None
 
     return out_path
 
@@ -1456,6 +1469,12 @@ def maps2Shp(map_files: list,
 
     dst_ds.SyncToDisk()
     dst_ds=None
+
+    # Remove any temporary files
+    os.remove(outVRT) # Remove vrt
+    dst_layer = None
+
+    src_ds = None
 
     return
 

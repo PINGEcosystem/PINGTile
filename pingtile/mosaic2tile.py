@@ -106,9 +106,9 @@ def doMosaic2tile(inFile: str,
 
     # sys.exit()
 
-    # Debug save geodataframe to shp
-    out_file = os.path.join(outDir, 'mov_win.shp')
-    movWin.to_file(out_file, driver='ESRI Shapefile')
+    # # Debug save geodataframe to shp
+    # out_file = os.path.join(outDir, 'mov_win.shp')
+    # movWin.to_file(out_file, driver='ESRI Shapefile')
 
     # Do moving window
     total_win = len(movWin)
@@ -122,6 +122,6 @@ def doMosaic2tile(inFile: str,
 
     dfAll = pd.DataFrame(sampleInfoAll)
 
-    # os.remove(mosaic_reproj) 
+    os.remove(mosaic_reproj) 
     
     return dfAll
