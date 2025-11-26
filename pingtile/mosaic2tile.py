@@ -39,9 +39,9 @@ def doMosaic2tile(inFile: str,
 
     # Reproject raster to epsg_out (if necessary)
     if bandCnt == 3:
-        mosaic_reproj = reproject_raster_keep_bands(src_path=inFile, dst_dir=outDir, dst_crs=epsg_out)
+        mosaic_reproj, del_reproj = reproject_raster_keep_bands(src_path=inFile, dst_dir=outDir, dst_crs=epsg_out)
     else:
-        mosaic_reproj = reproject_raster_gray(src_path=inFile, dst_path=outDir, dst_crs=epsg_out)
+        mosaic_reproj, del_reproj = reproject_raster_gray(src_path=inFile, dst_path=outDir, dst_crs=epsg_out)
 
     # # debug
     # mosaic_reproj = r'Z:\scratch\HabiMapper_Test\R00107_rect_wcr_mosaic_0_reproj.tif'
@@ -122,6 +122,7 @@ def doMosaic2tile(inFile: str,
 
     dfAll = pd.DataFrame(sampleInfoAll)
 
-    os.remove(mosaic_reproj) 
+    if del_reproj:
+        os.remove(mosaic_reproj)
     
     return dfAll
