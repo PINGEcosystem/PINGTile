@@ -346,7 +346,8 @@ def getMovingWindow(df: pd.DataFrame,
 
 #========================================================
 def getMaskFootprint(sonPath: str,
-                     pix_res: float=10.0):
+                     pix_res: float=10.0,
+                     buffer_m: float=100.0):
 
     # # Open the mask file
     # with rio.open(maskPath) as src:
@@ -392,7 +393,7 @@ def getMaskFootprint(sonPath: str,
             footprint_gdf = gpd.GeoDataFrame({'id': [1]}, geometry=[data_footprint], crs=src.crs)
 
             # Apply a buffer of 10 meters to the footprint to ensure coverage
-            footprint_gdf['geometry'] = footprint_gdf.geometry.buffer(10)
+            footprint_gdf['geometry'] = footprint_gdf.geometry.buffer(buffer_m)
 
             # # Save the footprint GeoDataFrame to a file
             # footprint_shp = os.path.join(outDir, fileName.replace('.tif', '_footprint.shp'))
