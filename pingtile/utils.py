@@ -1468,13 +1468,14 @@ def maps2Shp(map_files: list,
 
 
     dst_ds.SyncToDisk()
-    dst_ds=None
 
     # Remove any temporary files
-    os.remove(outVRT) # Remove vrt
+    dst_ds=None    
+    src_ds = None
     dst_layer = None
 
-    src_ds = None
+    os.remove(outVRT) # Remove vrt
+    
 
     return
 
