@@ -21,6 +21,8 @@ from shapely.geometry import box, shape
 from PIL import ImageColor, Image
 import cv2
 import json
+import warnings
+import shutil
 
 from skimage.io import imsave, imread
 import matplotlib.pyplot as plt
@@ -131,7 +133,7 @@ def reproject_raster_gray(src_path: str,
         src_crs = int(str(src.crs).split(':')[-1])
 
         if src_crs == dst_crs:
-            return src_path
+            return src_path, False
 
         with rio.open(dst_tmp, 'w', **kwargs) as dst:
             reproject(
@@ -151,7 +153,7 @@ def reproject_raster_gray(src_path: str,
 
     os.remove(dst_tmp)
 
-    return dst_path
+    return dst_path, True
 
 
 
@@ -1397,7 +1399,11 @@ def maps2Shp(map_files: list,
              outDir: str,
              outName: str,
              configFile: str,
-             bands: list=[1]):
+             minPatchSize: float=1.0,
+             bands: list=[1],
+             smoothShp: bool=False,
+             smoothTol_m: float=0.25
+             ):
 
 
     # Create vrt
@@ -1467,6 +1473,12 @@ def maps2Shp(map_files: list,
     for feat in layer:
         layer.DeleteFeature(feat.GetFID())
 
+    # # Delete by Area_m
+    # layer.SetAttributeFilter(f"Area_m < {minPatchSize}")
+
+    # for feat in layer:
+    #     layer.DeleteFeature(feat.GetFID())
+
 
     dst_ds.SyncToDisk()
 
@@ -1476,9 +1488,192 @@ def maps2Shp(map_files: list,
     dst_layer = None
 
     os.remove(outVRT) # Remove vrt
-    
+
+    # Repair invalid geometries
+    print("Repairing invalid geometries...")
+    gdf = gpd.read_file(dst_layername+'.shp')
+    gdf['geometry'] = gdf.geometry.buffer(0)
+    gdf['geometry'] = gdf.geometry.make_valid()
+    gdf.to_file(dst_layername+'.shp')
+
+    if minPatchSize > 0:
+        print(f"\nRemoving patches smaller than {minPatchSize} square meters...")
+        # Remove small patches
+        dissolve_small_patches(
+            shp_path=dst_layername+'.shp',
+            out_path=os.path.join(outDir, outName+'_dissolved.shp'),
+            minPatchSize=minPatchSize,
+            area_field='Area_m',
+            max_iters=5
+        )
+
+        # Remove original shapefile
+        for ext in ['.shp', '.shx', '.dbf', '.prj', '.cpg']:
+            file_path = dst_layername + ext
+            if os.path.exists(file_path):
+                os.remove(file_path)
+
+    # Smooth results
+    if minPatchSize > 0:
+        gdf = gpd.read_file(os.path.join(outDir, outName+'_dissolved.shp'))
+
+    else:
+        gdf = gpd.read_file(dst_layername+'.shp')
+
+    # Apply smoothing
+    if smoothShp:
+        print(f"\nSmoothing polygons with tolerance {smoothTol_m} meters...")
+        
+        # Use simplify_coverage to maintain shared boundaries
+        gdf['geometry'] = gdf.geometry.simplify_coverage(tolerance=smoothTol_m)
+
+        # Repair invalid geometries
+        print("\tRepairing invalid geometries...")
+        gdf['geometry'] = gdf.geometry.buffer(0)
+        gdf['geometry'] = gdf.geometry.make_valid()
+
+        # Explode multi-part geometries into single-part
+        gdf = gdf.explode(index_parts=False).reset_index(drop=True)
+        
+        # # Remove narrow necks by applying a tiny negative then positive buffer
+        # # This is much gentler than before to avoid creating gaps
+        # print("\tSmoothing out narrow necks...")
+        # tiny_buffer = smoothTol_m * 0.05  # Only 5% of smoothing tolerance
+        # gdf['geometry'] = gdf.geometry.buffer(-tiny_buffer).buffer(tiny_buffer)
+        
+        # # Clean up after buffering
+        # gdf['geometry'] = gdf.geometry.make_valid()
+        # gdf = gdf[~gdf.geometry.is_empty]
+        # gdf = gdf[gdf.geometry.is_valid].reset_index(drop=True)
+        # gdf = gdf.explode(index_parts=False).reset_index(drop=True)
+
+        gdf.to_file(os.path.join(outDir, outName+'_final.shp'))
+
+        # Remove previous dissolved shapefile
+        if minPatchSize > 0:
+            for ext in ['.shp', '.shx', '.dbf', '.prj', '.cpg']:
+                file_path = os.path.join(outDir, outName+'_dissolved' + ext)
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+
+        # # Do another small patch removal pass after smoothing
+        # print(f"\tRemoving patches smaller than {minPatchSize} square meters after smoothing...")
+        # dissolve_small_patches(
+        #     shp_path=os.path.join(outDir, outName+'_smoothed.shp'),
+        #     out_path=os.path.join(outDir, outName+'_final.shp'),
+        #     minPatchSize=minPatchSize,
+        #     area_field='Area_m',
+        #     max_iters=5
+        # )
+
+        # # Remove smoothed shapefile
+        # for ext in ['.shp', '.shx', '.dbf', '.prj', '.cpg']:
+        #     file_path = os.path.join(outDir, outName+'_smoothed' + ext)
+        #     if os.path.exists(file_path):
+        #         os.remove(file_path)
 
     return
+
+def dissolve_small_patches(
+    shp_path: str,
+    out_path: str,
+    minPatchSize: float,
+    area_field: str = "Area_m",
+    max_iters: int = 5,
+    touch_tol: float = 0.0,
+    repair_invalid: bool = True,
+):
+    """
+    Merge polygons smaller than minPatchSize into the largest touching/intersecting neighbor (any class).
+    - touch_tol: buffer distance (in layer CRS units) to expand small polygons when searching for neighbors.
+                 Use a small value (e.g., 0.1 or 1.0) to overcome tiny gaps.
+    - repair_invalid: fix invalid geometries via buffer(0) before/while merging.
+    """
+    gdf = gpd.read_file(shp_path)
+    if gdf.empty:
+        warnings.warn("Empty input.")
+        gdf.to_file(out_path)
+        return out_path
+
+    if repair_invalid:
+        # Fix invalid geometries up-front
+        gdf["geometry"] = gdf.geometry.buffer(0)
+
+    # Ensure area field exists
+    if area_field not in gdf.columns:
+        gdf[area_field] = gdf.geometry.area
+
+    for _ in range(max_iters):
+        # Recompute area after previous merges
+        gdf[area_field] = gdf.geometry.area
+
+        small_mask = gdf[area_field] < float(minPatchSize)
+        if not small_mask.any():
+            break
+
+        # Build fresh spatial index this pass
+        sindex = gdf.sindex
+        changed = False
+        to_drop = []
+
+        # Iterate by label to avoid stale positions; we reset index only after the pass
+        for idx in gdf.index[small_mask]:
+            geom_small = gdf.at[idx, "geometry"]
+            if geom_small is None or geom_small.is_empty:
+                continue
+
+            query_geom = geom_small if touch_tol <= 0 else geom_small.buffer(touch_tol)
+
+            # GeoPandas sindex.query returns positional indices (iloc), convert to labels
+            try:
+                nbr_pos = list(sindex.query(query_geom, predicate="intersects"))
+            except TypeError:
+                nbr_pos = sindex.query(query_geom, predicate="intersects")
+            # Positions -> labels
+            nbr_labels = gdf.iloc[nbr_pos].index.tolist() if len(nbr_pos) else []
+            nbr_labels = [j for j in nbr_labels if j != idx]
+
+            if not nbr_labels:
+                # No touching neighbor found; keep this small polygon
+                continue
+
+            # Pick neighbor with largest area_field
+            best = max(nbr_labels, key=lambda j: gdf.at[j, area_field])
+            geom_best = gdf.at[best, "geometry"]
+
+            # Attempt merge; repair if needed
+            try:
+                merged = geom_best.union(geom_small)
+            except Exception:
+                if repair_invalid:
+                    try:
+                        merged = geom_best.buffer(0).union(geom_small.buffer(0))
+                    except Exception:
+                        continue
+                else:
+                    continue
+
+            # Update receiver and mark donor for removal
+            gdf.at[best, "geometry"] = merged
+            changed = True
+            to_drop.append(idx)
+
+        if to_drop:
+            gdf = gdf.drop(index=to_drop).reset_index(drop=True)
+
+        if not changed:
+            break  # nothing merged this pass
+
+    # Repair invalid geometries
+    print("\tRepairing invalid geometries...")
+    gdf['geometry'] = gdf.geometry.buffer(0)
+    gdf['geometry'] = gdf.geometry.make_valid()
+
+    # Final area recompute and write
+    gdf[area_field] = gdf.geometry.area
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    gdf.to_file(out_path, driver="ESRI Shapefile")
+    return out_path
 
 #========================================================
 def create_vrt(imgsToMosaic: list,
