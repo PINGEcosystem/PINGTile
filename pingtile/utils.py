@@ -23,6 +23,7 @@ import cv2
 import json
 import warnings
 import shutil
+from shapely.wkt import loads
 
 from skimage.io import imsave, imread
 import matplotlib.pyplot as plt
@@ -288,8 +289,11 @@ def getMovingWindow_rast(sonRast: str,
 
         # iterate windows but ensure the window stays inside raster bounds
         # use last-start positions so we include the right/bottom edge when not divisible
-        x_starts = list(range(0, sonRast.width + 1, windowStride_px))
-        y_starts = list(range(0, sonRast.height + 1, windowStride_px))
+        # x_starts = list(range(0, sonRast.width + 1, windowStride_px))
+        # y_starts = list(range(0, sonRast.height + 1, windowStride_px))
+        x_starts = list(range(0, sonRast.width + windowSize_px[0] + 1, windowStride_px))
+        y_starts = list(range(0, sonRast.height + windowSize_px[1] + 1, windowStride_px))
+
         # # if there is leftover remainder, include the last window anchored at the edge
         # if (sonRast.width - windowSize_px[0]) not in x_starts:
         #     x_starts.append(sonRast.width - windowSize_px[0])
@@ -329,9 +333,11 @@ def getMovingWindow(df: pd.DataFrame,
     movWindow = []
 
     x = min_x
-    while x + windowSize[0] <= max_x:
+    # while x + windowSize[0] <= max_x:
+    while x <= max_x:
         y = min_y
-        while y + windowSize[1] <= max_y:
+        # while y + windowSize[1] <= max_y:
+        while y <= max_y:
             extent = (x, y, x + windowSize[0], y + windowSize[1])
             movWindow.append(extent)
             y += windowStride_m
@@ -943,7 +949,7 @@ def avg_npz_files_batch(df: pd.DataFrame,
     # Convert to GeoDataFrame
     geometry = box(win_minx, win_miny, win_maxx, win_maxy)
     # df['geometry'] = gpd.GeoSeries.from_bounds(win_minx, win_miny, win_maxx, win_maxy, crs=f"EPSG:{epsg}").geometry
-    df['geometry'] = gpd.GeoSeries([geometry], crs=f"EPSG:{epsg}")
+    df['geometry'] = gpd.GeoSeries([geometry], crs=f"EPSG:{epsg}").values
 
     # Cleanup files from memory
     npz.close()
@@ -959,13 +965,44 @@ def avg_npz_files(df: pd.DataFrame,
                   windowSize_m: tuple,
                   stride: int,
                   epsg: int,
-                  threadCnt: int=4):
+                  threadCnt: int=4,
+                #   overlap_threshold: float = 30.0,
+                  ):
     '''
     Average overlapping npz files
     '''
 
     # Get non-overlapping moving window geodataframe
     movWin = getMovingWindow(df=df, windowSize=windowSize_m, windowStride_m=stride, epsg=epsg)
+
+    geometries = [loads(geom) if isinstance(geom, str) else geom for geom in df['geometry']]
+    footprint = gpd.GeoDataFrame(df, geometry=geometries, crs=f"EPSG:{epsg}")
+    # Dissolve to a single footprint polygon
+    footprint = footprint.dissolve().reset_index(drop=True)
+
+    # debug
+    # save footprint to shapefile
+    footprint.to_file(os.path.join(out_dir, 'Footprint.shp'), driver='ESRI Shapefile')
+
+    print(footprint)
+    print(movWin)
+
+    # Spatially join to find movWin that overlap with the dissolved footprint
+    joined = gpd.sjoin(movWin, footprint[['geometry']], how='inner', predicate='intersects')
+    # Keep only unique movWin entries (in case multiple footprints overlap same window)
+    movWin = movWin.loc[joined.index.unique()].reset_index(drop=True)
+    
+    # # Alternative: Calculate overlap percentage for each movWin
+    # dissolved_footprint = footprint.geometry.iloc[0]
+    # movWin['overlap_area'] = movWin.geometry.intersection(dissolved_footprint).area
+    # movWin['window_area'] = movWin.geometry.area
+    # movWin['overlap_percent'] = (movWin['overlap_area'] / movWin['window_area']) * 100
+    # 
+    # # Filter windows with at least X.X% overlap
+    # movWin = movWin[movWin['overlap_percent'] >= overlap_threshold].reset_index(drop=True)
+    # print(f"Windows with >= {overlap_threshold}% overlap: {len(movWin)}")
+    
+    print(movWin)
     
     # Save moving window to shapefile
     out_file = os.path.join(out_dir, 'Map_Tiles.shp')
