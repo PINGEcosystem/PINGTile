@@ -2,7 +2,7 @@ import glob
 from roboflow import Roboflow
 
 # Initialize Roboflow client
-rf = Roboflow(api_key="ROBOFLOW_API_KEY")
+rf = Roboflow(api_key="ADD_ROBOFLOW_API_KEY_HERE") #More info: https://docs.roboflow.com/developer/authentication/find-your-roboflow-api-key
 
 # Directory path and file extension for images
 dir_name = r"Z:\tmp\pingtile_test\12_12\json"
