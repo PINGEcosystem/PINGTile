@@ -15,6 +15,9 @@ import pandas as pd
 import shapely
 import numpy as np
 from skimage.transform import resize, warp, PiecewiseAffineTransform
+from skimage.morphology import remove_small_objects, remove_small_holes
+from skimage.measure import label as sklabel
+from skimage.segmentation import watershed
 from joblib import Parallel, delayed
 from tqdm import tqdm
 from shapely.geometry import box, shape
@@ -1031,7 +1034,7 @@ def avg_npz_files(df: pd.DataFrame,
 
 
 #========================================================
-def label_array_to_raster(df, out_dir: str, outName: str, windowSize_m: tuple, epsg: int):
+def label_array_to_raster(df, out_dir: str, outName: str, minPatchSize: float, windowSize_m: tuple, epsg: int):
     """
     Create a georeferenced single-band GeoTIFF from an npz softmax array.
 
@@ -1062,6 +1065,12 @@ def label_array_to_raster(df, out_dir: str, outName: str, windowSize_m: tuple, e
 
     height, width = label.shape
     transform = rio.transform.from_bounds(minx, miny, maxx, maxy, width, height)
+
+    # Get pixel size
+    pix_m = (maxx - minx) / width
+
+    # Remove small objects from label
+    label = filterLabel(label, min_size=minPatchSize, pix_m=pix_m)
 
     os.makedirs(out_dir, exist_ok=True)
 
@@ -1111,6 +1120,64 @@ def label_array_to_raster(df, out_dir: str, outName: str, windowSize_m: tuple, e
     return out_path
 
 
+
+#=======================================================================
+def filterLabel(l, min_size, pix_m, df=None):
+    '''
+    For a classified substrate label, small holes/objects are removed,
+    and pixels classified as NoData are removed and adjecent class is
+    filled in it's place.
+
+    ----------
+    Parameters
+    ----------
+
+    ----------------------------
+    Required Pre-processing step
+    ----------------------------
+
+    -------
+    Returns
+    -------
+
+    --------------------
+    Next Processing Step
+    --------------------
+    '''
+    # # # Get pixel size (in meters)
+    # # pix_m = self.pixM
+    # pix_m = df['pixM'].values[0] if df is not None else 0.02
+
+
+    # Convert min size to pixels
+    min_size = int(min_size/pix_m)
+
+    # Set nan's to zero
+    l = np.nan_to_num(l, nan=0).astype('uint8')
+
+    # Label all regions
+    lbl = sklabel(l)
+
+    # First set small objects to background value (0); skip call if only one label to avoid skimage warning
+    if lbl.max() <= 1:
+        noSmall = lbl
+    else:
+        noSmall = remove_small_objects(lbl, min_size)
+
+    # Punch holes in original label
+    holes = ~(noSmall==0)
+
+    l = l*holes
+
+    # Remove small holes
+    # Convert l to binary
+    binary_objects = l.astype(bool)
+    # Remove the holes
+    binary_filled = remove_small_holes(binary_objects, min_size)
+    # Recover classification with holes filled
+    objects_filled = watershed(binary_filled, l, mask=binary_filled)
+
+    return objects_filled
 
 # def label_array_to_shapefile(df, in_dir, out_dir, outName, windowSize_m, epsg):
 #     """
@@ -1303,6 +1370,7 @@ def label_array_to_raster(df, out_dir: str, outName: str, windowSize_m: tuple, e
 def map_npzs(df: pd.DataFrame, 
              in_dir: str, 
              out_dir: str, 
+             minPatchSize: float,
              outName: str, 
              windowSize_m: tuple, 
              epsg: int,
@@ -1376,7 +1444,7 @@ def map_npzs(df: pd.DataFrame,
     #     label_array_to_raster(row, out_dir, outName, windowSize_m, epsg)
 
     total_maps = len(df)
-    _ = Parallel(n_jobs=threadCnt)(delayed(label_array_to_raster)(df.iloc[i], out_dir, outName, windowSize_m, epsg) for i in tqdm(range(total_maps)))
+    _ = Parallel(n_jobs=threadCnt)(delayed(label_array_to_raster)(df.iloc[i], out_dir, outName, minPatchSize, windowSize_m, epsg) for i in tqdm(range(total_maps)))
 
     return df
     
