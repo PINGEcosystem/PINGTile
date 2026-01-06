@@ -9,13 +9,13 @@ Copyright (c) 2025 Cameron S. Bodine
 import os, sys
 from joblib import Parallel, delayed, cpu_count
 
-# # Debug
-# from imglbl2tile import doImgLbl2tile
-# from utils import mask_to_coco_json
+# Debug
+from imglbl2tile import doImgLbl2tile
+from utils import mask_to_coco_json
 
-# For Package
-from pingtile.imglbl2tile import doImgLbl2tile
-from pingtile.utils import mask_to_coco_json
+# # For Package
+# from pingtile.imglbl2tile import doImgLbl2tile
+# from pingtile.utils import mask_to_coco_json
 
 import rasterio as rio
 import json
@@ -23,22 +23,17 @@ import json
 ############
 # Parameters
 
-map = r"D:\scratch\Delaware_Catherine_Test\SHPS_FromGIS\N_2013_Line4_forPINGTile.shp"
-sonarDir = r"D:\scratch\Delaware_Catherine_Test\sonar"
+map = r"Z:\scratch\2023_N_CBB_0511_Line2\PINGTile_MinClasses_2023_N_Line2_0511.shp"
+sonarDir = r"Z:\scratch\2023_N_CBB_0511_Line2"
 
-outDirTop = r'D:\scratch\Delaware_Catherine_Test'
+outDirTop = r'Z:\scratch\Delaware_Catherine_Test'
 outName = 'Delaware_test'
 
 classCrossWalk = {
-    'X':0,
-    'Exposed Bedrock':1,
-    'Bedrock With Fine Substrate Cover':2,
-    'Bedrock With Coarse Substrate Cover':2,
-    'Gravels':3,
-    'Gravel And Sand Mix':4,
-    'Sands':5,
-    'Sand And Mud Mix':6,
-    'Muds':7,
+    'Background': 0,
+    'Fine Substrates': 1,
+    'Coarse Substrates': 2,
+    'Bedrock With Cover': 3,
 }
 
 windowSize_m = [
@@ -48,7 +43,7 @@ windowSize_m = [
                 ]
 
 windowStride = 12
-classFieldName = 'CMECSClass'
+classFieldName = 'CMECS'
 minArea_percent = 0.75
 target_size = (512, 512) #(1024, 1024)
 threadCnt = 0.75

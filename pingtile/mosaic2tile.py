@@ -36,9 +36,13 @@ def doMosaic2tile(inFile: str,
     # Check src_path band count
     with rio.open(inFile) as src:
         bandCnt = src.count
+    
+    # Limit band count to 3 if greater than 3
+    if bandCnt > 3:
+        bandCnt = 3
 
     # Reproject raster to epsg_out (if necessary)
-    if bandCnt == 3:
+    if bandCnt >= 3:
         mosaic_reproj, del_reproj = reproject_raster_keep_bands(src_path=inFile, dst_dir=outDir, dst_crs=epsg_out)
     else:
         mosaic_reproj, del_reproj = reproject_raster_gray(src_path=inFile, dst_path=outDir, dst_crs=epsg_out)

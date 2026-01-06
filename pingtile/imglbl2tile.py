@@ -11,10 +11,10 @@ from joblib import Parallel, delayed
 from tqdm import tqdm
 import rasterio as rio
 
-# # Debug
-# from utils import reproject_raster_keep_bands, reproject_raster_gray, getMovingWindow_rast, doMovWin, reproject_shp, doMovWin_imgshp, getMaskFootprint
+# Debug
+from utils import reproject_raster_keep_bands, reproject_raster_gray, getMovingWindow_rast, doMovWin, reproject_shp, doMovWin_imgshp, getMaskFootprint
 
-from pingtile.utils import reproject_raster, getMovingWindow_rast, doMovWin, reproject_shp, doMovWin_imgshp, getMaskFootprint
+# from pingtile.utils import reproject_raster_gray, reproject_raster_keep_bands, getMovingWindow_rast, doMovWin, reproject_shp, doMovWin_imgshp, getMaskFootprint
 
 
 #=======================================================================
@@ -40,6 +40,10 @@ def doImgLbl2tile(inFileSonar: str,
     # Check src_path band count
     with rio.open(inFileSonar) as src:
         bandCnt = src.count
+    
+    # Limit band count to 3 if greater than 3
+    if bandCnt > 3:
+        bandCnt = 3
 
     # Reproject raster to epsg_out (if necessary)
     if bandCnt >= 3:
@@ -54,7 +58,7 @@ def doImgLbl2tile(inFileSonar: str,
     if inFileMask.lower().endswith('.shp'):
         mask_reproj = reproject_shp(src_path=inFileMask, dst_crs=epsg_out)
     else:
-        mask_reproj = reproject_raster(src_path=inFileMask, dst_path=outDir, dst_crs=epsg_out)
+        mask_reproj = reproject_raster_gray(src_path=inFileMask, dst_path=outDir, dst_crs=epsg_out)
 
     # Get the moving window
     movWin = getMovingWindow_rast(sonRast=mosaic_reproj, windowSize=windowSize, windowStride_m=windowStride_m)

@@ -218,12 +218,12 @@ def reproject_raster_keep_bands(
             "tiled": True
         })
 
-        dest = np.zeros((profile["count"], height, width), dtype=profile["dtype"])
-
+    with rio.open(out_path, "w", **profile) as dst:
         for b in range(1, src.count + 1):
+            dest_band = np.zeros((height, width), dtype=profile["dtype"])
             reproject(
                 source=rio.band(src, b),
-                destination=dest[b - 1],
+                destination=dest_band,
                 src_transform=src.transform,
                 src_crs=src_crs,
                 dst_transform=transform,
@@ -231,11 +231,10 @@ def reproject_raster_keep_bands(
                 resampling=resampling,
                 dst_nodata=src.nodata
             )
-
-    with rio.open(out_path, "w", **profile) as dst:
-        dst.write(dest)
-        if profile.get("nodata") is not None:
-            dst.nodata = profile["nodata"]
+            dst.write(dest_band, b)
+        
+        if src.nodata is not None:
+            dst.nodata = src.nodata
 
     return out_path
 
@@ -484,22 +483,43 @@ def doMovWin_imgshp(i: int,
 
         # Clip the raster using the window geometry
         try:
-            clipped_raster, clipped_transform = mask(sonRast, [window_geom], crop=True)
+            clipped_raster_orig, clipped_transform = mask(sonRast, [window_geom], crop=True)
             
-            # Drop the first two dimensions of clipped_raster if they have a size of 1
-            if clipped_raster.shape[0] == 1:
-                clipped_raster = clipped_raster[0]
-            if clipped_raster.shape[0] == 1:
-                clipped_raster = clipped_raster[:, 0]
+            # Handle band count: limit to 3 if >= 3, keep as 1 if 1
+            num_bands = clipped_raster_orig.shape[0]
+            
+            if num_bands == 1:
+                # Single band: shape is (1, height, width) -> (height, width)
+                clipped_raster_2d = clipped_raster_orig[0]
+            elif num_bands >= 3:
+                # Three or more bands: take first 3 bands
+                clipped_raster_2d = clipped_raster_orig[:3]
+                num_bands = 3
+            else:
+                # 2 bands: keep as is
+                clipped_raster_2d = clipped_raster_orig
 
             # Resize to target_size
-            clipped_raster_resized = resize(clipped_raster, target_size, preserve_range=True, anti_aliasing=True).astype('uint8')
+            if num_bands == 1:
+                # For single band, resize is straightforward
+                clipped_raster_resized = resize(clipped_raster_2d, target_size, preserve_range=True, anti_aliasing=True).astype('uint8')
+            else:
+                # For multi-band (2 or 3), handle as multi-band
+                # Transpose to (height, width, bands) for resize, then transpose back
+                clipped_raster_transposed = np.transpose(clipped_raster_2d, (1, 2, 0))
+                clipped_raster_resized_transposed = resize(clipped_raster_transposed, target_size + (num_bands,), preserve_range=True, anti_aliasing=True).astype('uint8')
+                clipped_raster_resized = np.transpose(clipped_raster_resized_transposed, (2, 0, 1))
 
-            # Calculate the percentage of non-zero pixels
-            non_zero_percentage = np.count_nonzero(clipped_raster_resized) / clipped_raster_resized.size
+            # Calculate the percentage of non-zero pixels (use first band for consistency)
+            if num_bands == 1:
+                non_zero_percentage = np.count_nonzero(clipped_raster_resized) / clipped_raster_resized.size
+            else:
+                # For multi-band, use first band to match 1-band behavior
+                non_zero_percentage = np.count_nonzero(clipped_raster_resized[0]) / (clipped_raster_resized.shape[1] * clipped_raster_resized.shape[2])
 
             # Check if the cropped raster has any valid (non-zero) values
             if clipped_raster_resized.any() and non_zero_percentage >= minArea_percent:
+
 
                 # Recalculate the transform for the resized raster
                 new_transform = rio.transform.from_bounds(
@@ -512,34 +532,48 @@ def doMovWin_imgshp(i: int,
                 out_raster_path = os.path.join(outSonDir, f"{fileName}.png")
                 # out_shapefile_path = os.path.join(outMaskDir, f"{fileName}.shp")
 
-                # Create a mask from clipped_raster_resized
-                clipped_raster_mask = np.where(clipped_raster_resized > 0, 1, 0)
+                # Create a mask from clipped_raster_resized (use first band for mask)
+                if num_bands == 1:
+                    clipped_raster_mask = np.where(clipped_raster_resized > 0, 1, 0)
+                else:
+                    clipped_raster_mask = np.where(clipped_raster_resized[0] > 0, 1, 0)
 
                 with rio.open(
                     out_raster_path,
                     'w',
                     driver='GTiff',
-                    height=clipped_raster_resized.shape[0],
-                    width=clipped_raster_resized.shape[1],
-                    count=1,
+                    height=target_size[0],
+                    width=target_size[1],
+                    count=num_bands,
                     dtype=clipped_raster_resized.dtype,
                     crs=sonRast.crs,
                     transform=new_transform,
                 ) as dst:
-                    dst.write(clipped_raster_resized, 1)
+                    if num_bands == 1:
+                        dst.write(clipped_raster_resized, 1)
+                    else:
+                        for b in range(num_bands):
+                            dst.write(clipped_raster_resized[b], b + 1)
 
                 # clipped_hmDF.to_file(out_shapefile_path)
                 
                 del clipped_raster_resized
 
-                # Rasterize the clipped_hmDF based on the "value" field
+                # Get spatial dimensions from the band-limited raster
+                if num_bands == 1:
+                    raster_height, raster_width = clipped_raster_2d.shape
+                else:
+                    _, raster_height, raster_width = clipped_raster_2d.shape
+
+                # Rasterize the clipped_hmDF based on the "value" field 
+                # rasterize creates a single 2D output regardless of input bands
                 shapes = ((geom, value) for geom, value in zip(clipped_hmDF.geometry, clipped_hmDF['value']))
                 rasterized_hmDF = rio.features.rasterize(
                     shapes,
-                    out_shape=clipped_raster.shape,
+                    out_shape=(raster_height, raster_width),
                     transform=clipped_transform,
                     fill=0,
-                    dtype=clipped_raster.dtype
+                    dtype='uint8'
                 )
 
                 # Resize to target_size
@@ -596,37 +630,66 @@ def doMovWin_imgshp(i: int,
                     sampleInfo[k] = v
 
                 if doPlot:
-                    # Make a plot
-                    img_f = out_raster_path
-                    lbl_f = out_rasterized_path
+                    try:
+                        # Make a plot
+                        img_f = out_raster_path
+                        lbl_f = out_rasterized_path
 
-                    img = imread(img_f)
-                    lbl = imread(lbl_f)
+                        if not os.path.exists(img_f):
+                            print(f"[WARNING] Image file not found: {img_f}")
+                        if not os.path.exists(lbl_f):
+                            print(f"[WARNING] Label file not found: {lbl_f}")
 
-                    plt.imshow(img, cmap='gray')
+                        img = imread(img_f)
+                        lbl = imread(lbl_f)
 
-                    #blue,red, yellow,green, etc
-                    class_label_colormap = ['#3366CC','#DC3912','#FF9900','#109618','#990099','#0099C6','#DD4477',
-                                            '#66AA00','#B82E2E', '#316395','#0d0887', '#46039f', '#7201a8',
-                                            '#9c179e', '#bd3786', '#d8576b', '#ed7953', '#fb9f3a', '#fdca26', '#f0f921']
+                        # Handle both 1-band and 3-band imagery for plotting
+                        if img.ndim == 3 and img.shape[2] == 3:
+                            # RGB image
+                            plt.imshow(img)
+                        else:
+                            # Grayscale image
+                            plt.imshow(img, cmap='gray')
 
-                    color_label = label_to_colors(lbl, img[:,:]==0,
-                                        alpha=128, colormap=class_label_colormap,
-                                            color_class_offset=0, do_alpha=False)
+                        #blue,red, yellow,green, etc
+                        class_label_colormap = ['#3366CC','#DC3912','#FF9900','#109618','#990099','#0099C6','#DD4477',
+                                                '#66AA00','#B82E2E', '#316395','#0d0887', '#46039f', '#7201a8',
+                                                '#9c179e', '#bd3786', '#d8576b', '#ed7953', '#fb9f3a', '#fdca26', '#f0f921']
 
-                    plt.imshow(color_label,  alpha=0.5)
+                        # Handle both 1-band and 3-band imagery for masking
+                        if img.ndim == 3:
+                            # RGB image: create mask from first band
+                            img_mask = img[:,:,0] == 0
+                        else:
+                            # Grayscale image
+                            img_mask = img[:,:] == 0
 
-                    file = os.path.basename(img_f)
-                    out_file = os.path.join(outPltDir, file)
+                        color_label = label_to_colors(lbl, img_mask,
+                                            alpha=128, colormap=class_label_colormap,
+                                                color_class_offset=0, do_alpha=False)
 
+                        plt.imshow(color_label,  alpha=0.5)
 
-                    plt.axis('off')
-                    plt.title(file)
-                    plt.savefig(out_file, dpi=200, bbox_inches='tight')
-                    plt.close('all')
+                        file = os.path.basename(img_f)
+                        out_file = os.path.join(outPltDir, file)
+
+                        # Ensure plot directory exists
+                        os.makedirs(outPltDir, exist_ok=True)
+
+                        plt.axis('off')
+                        plt.title(file)
+                        plt.savefig(out_file, dpi=200, bbox_inches='tight')
+                        plt.close('all')
+                    except Exception as e:
+                        print(f"[ERROR] Exception in plotting: {str(e)}")
+                        import traceback
+                        traceback.print_exc()
 
                 return sampleInfo
-        except:
+        except Exception as e:
+            print(f"[ERROR] Exception in doMovWin_imgshp: {str(e)}")
+            import traceback
+            traceback.print_exc()
             pass
 
 ##========================================================       
