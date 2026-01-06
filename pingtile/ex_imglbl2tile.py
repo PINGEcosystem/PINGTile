@@ -9,13 +9,13 @@ Copyright (c) 2025 Cameron S. Bodine
 import os, sys
 from joblib import Parallel, delayed, cpu_count
 
-# Debug
-from imglbl2tile import doImgLbl2tile
-from utils import mask_to_coco_json
+# # Debug
+# from imglbl2tile import doImgLbl2tile
+# from utils import mask_to_coco_json
 
-# # For Package
-# from pingtile.imglbl2tile import doImgLbl2tile
-# from pingtile.utils import mask_to_coco_json
+# For Package
+from pingtile.imglbl2tile import doImgLbl2tile
+from pingtile.utils import mask_to_coco_json
 
 import rasterio as rio
 import json
