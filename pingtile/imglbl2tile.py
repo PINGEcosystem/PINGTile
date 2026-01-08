@@ -1,6 +1,6 @@
 
 '''
-Copyright (c) 2025 Cameron S. Bodine
+Copyright (c) 2025- Cameron S. Bodine
 '''
 
 #########
@@ -11,10 +11,10 @@ from joblib import Parallel, delayed
 from tqdm import tqdm
 import rasterio as rio
 
-# Debug
-from utils import reproject_raster_keep_bands, reproject_raster_gray, getMovingWindow_rast, doMovWin, reproject_shp, doMovWin_imgshp, getMaskFootprint
+# # Debug
+# from utils import reproject_raster_keep_bands, reproject_raster_gray, getMovingWindow_rast, doMovWin, reproject_shp, doMovWin_imgshp, getMaskFootprint
 
-# from pingtile.utils import reproject_raster_gray, reproject_raster_keep_bands, getMovingWindow_rast, doMovWin, reproject_shp, doMovWin_imgshp, getMaskFootprint
+from pingtile.utils import reproject_raster_gray, reproject_raster_keep_bands, getMovingWindow_rast, doMovWin, reproject_shp, doMovWin_imgshp, getMaskFootprint
 
 
 #=======================================================================
