@@ -1906,6 +1906,22 @@ def mask_to_coco_json(mask_path, image_info, categories_info, annotation_id_coun
                 annotation_id_counter += 1
     return annotations, annotation_id_counter
 
+# ======================================================================
+def addZero(chunk: int):
+    # Determine leading zeros to match naming convention
+    if chunk < 10:
+        addZero = '0000'
+    elif chunk < 100:
+        addZero = '000'
+    elif chunk < 1000:
+        addZero = '00'
+    elif chunk < 10000:
+        addZero = '0'
+    else:
+        addZero = ''
+
+    return addZero
+
 
 
 
