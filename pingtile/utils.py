@@ -483,6 +483,10 @@ def doMovWin_imgshp(i: int,
 
         # Clip the raster using the window geometry
         try:
+            raster_bounds = box(*sonRast.bounds)
+            if not raster_bounds.intersects(window_geom):
+                return  # window is completely outside the raster; skip it
+
             clipped_raster_orig, clipped_transform = mask(sonRast, [window_geom], crop=True)
             
             # Handle band count: limit to 3 if >= 3, keep as 1 if 1
