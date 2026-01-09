@@ -301,17 +301,15 @@ project = rf.workspace().project("ADD_PROJECT_NAME_HERE")
 image_glob = glob.glob(dir_name + '/*' + file_extension_type)
 for image_path in image_glob:
     try:
-        print(project.single_upload(
+        result = project.single_upload(
             image_path=image_path,
             annotation_path=annotation_filename,
-            # -- optional parameters: --
-            # annotation_labelmap=labelmap_path,
-            # split='train',
-            # num_retry_uploads=0,
-            # batch_name='batch_name',
-            # tag_names=['tag1', 'tag2'],
-            # is_prediction=False,
-        ))
+        )
+        # Roboflow returns a dict; check for an error key or a successful upload URL
+        if result.get("error"):
+            print(f"Upload failed for {image_path}: {result['error']}")
+        else:
+            print(f"Uploaded {image_path} -> {result.get('image') or result}")
     except Exception as e:
         print(f"Error uploading {image_path}: {e}")
 ```
