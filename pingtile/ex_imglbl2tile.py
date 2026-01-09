@@ -8,6 +8,7 @@ Copyright (c) 2025 Cameron S. Bodine
 
 import os, sys
 from joblib import Parallel, delayed, cpu_count
+from PIL import Image
 
 # # Debug
 # from imglbl2tile import doImgLbl2tile
@@ -34,6 +35,7 @@ classCrossWalk = {
     'Fine Substrates': 1,
     'Coarse Substrates': 2,
     'Bedrock With Cover': 3,
+    'Exposed Bedrock': 4,
 }
 
 windowSize_m = [
@@ -149,7 +151,7 @@ if lbl2COCO:
                 if file.lower().endswith(('.tif', '.tiff', '.png', '.jpg', '.jpeg')):
                     maskFiles.append(os.path.join(root, file))
 
-        maskFiles=maskFiles[:10] # Debug limit to 10 files
+        # maskFiles=maskFiles[:10] # Debug limit to 10 files
 
         # Build categories list / lookup from classCrossWalk
         # categories_info passed to mask_to_coco_json should map id -> name
@@ -170,44 +172,33 @@ if lbl2COCO:
 
         for mask_path in maskFiles:
             base = os.path.splitext(os.path.basename(mask_path))[0]
-
-            # try to find corresponding image filename in images folder (same base name)
-            matched_image = None
-            for ext in ('.png', '.jpg', '.jpeg', '.tif', '.tiff'):
-                candidate = os.path.join(outSonDir, base + ext)
-                if os.path.exists(candidate):
-                    matched_image = os.path.basename(candidate)
-                    break
-            if matched_image is None:
-                # fallback to mask basename (acceptable as file_name in COCO)
-                matched_image = os.path.basename(mask_path)
-
-            # read mask to get width/height
-            try:
-                with rio.open(mask_path) as src:
-                    width, height = src.width, src.height
-            except Exception as e:
-                print(f"Skipping {mask_path}: cannot read ({e})")
+            # Find corresponding image
+            image_path = os.path.join(outSonDir, base + '.png')
+            if not os.path.exists(image_path):
                 continue
-
+            
+            # Add image entry
+            img = Image.open(image_path)
             image_info = {
                 "id": image_id,
-                "file_name": matched_image,
-                "width": width,
-                "height": height
+                "file_name": os.path.basename(image_path),
+                "width": img.width,
+                "height": img.height
             }
-
-            # mask_to_coco_json should return (annotations_list, next_annotation_id)
-            anns, annotation_id = mask_to_coco_json(mask_path, image_info, categories_info, annotation_id)
-
-            if anns:
-                coco["images"].append(image_info)
-                coco["annotations"].extend(anns)
-                image_id += 1
+            coco["images"].append(image_info)
+            
+            # Convert mask to COCO annotations
+            annotations, annotation_id = mask_to_coco_json(mask_path, image_info, categories_info, annotation_id)
+            coco["annotations"].extend(annotations)
+            annotation_id += len(annotations)
+            image_id += 1
 
         out_json = os.path.join(outJsonDir, f"_annotations.coco.json")
         with open(out_json, "w") as f:
-            json.dump(coco, f)
+            json.dump(coco, f, indent=2)
+        
+        print(f"COCO JSON saved to {out_json} with {len(coco['images'])} images and {len(coco['annotations'])} annotations.")
+
 
         
         
