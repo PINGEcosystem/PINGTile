@@ -134,10 +134,19 @@ def reproject_raster_gray(src_path: str,
             'dtype': 'uint8'  # Greyscale
         })
 
-        src_crs = int(str(src.crs).split(':')[-1])
-
-        if src_crs == dst_crs:
-            return src_path, False
+        # Check if source CRS matches destination CRS
+        # Handle both EPSG codes and complex CRS definitions
+        try:
+            src_crs_str = str(src.crs)
+            if src_crs_str.startswith('EPSG:'):
+                src_crs_code = int(src_crs_str.split(':')[-1])
+                if src_crs_code == dst_crs:
+                    return src_path, False
+            # For non-EPSG CRS, compare the CRS objects directly
+            elif src.crs == rio.crs.CRS.from_epsg(dst_crs):
+                return src_path, False
+        except:
+            pass  # If comparison fails, proceed with reprojection
 
         with rio.open(dst_tmp, 'w', **kwargs) as dst:
             reproject(
