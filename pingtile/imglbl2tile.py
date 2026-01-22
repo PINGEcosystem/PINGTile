@@ -49,7 +49,7 @@ def doImgLbl2tile(inFileSonar: str,
     if bandCnt >= 3:
         mosaic_reproj = reproject_raster_keep_bands(src_path=inFileSonar, dst_dir=outDir, dst_crs=epsg_out)
     else:
-        mosaic_reproj = reproject_raster_gray(src_path=inFileSonar, dst_path=outDir, dst_crs=epsg_out)
+        mosaic_reproj, _ = reproject_raster_gray(src_path=inFileSonar, dst_path=outDir, dst_crs=epsg_out)
 
     # # Reproject raster to epsg_out (if necessary)
     # mosaic_reproj = reproject_raster(src_path=inFileSonar, dst_path=outDir, dst_crs=epsg_out)
@@ -58,7 +58,7 @@ def doImgLbl2tile(inFileSonar: str,
     if inFileMask.lower().endswith('.shp'):
         mask_reproj = reproject_shp(src_path=inFileMask, dst_crs=epsg_out)
     else:
-        mask_reproj = reproject_raster_gray(src_path=inFileMask, dst_path=outDir, dst_crs=epsg_out)
+        mask_reproj, _ = reproject_raster_gray(src_path=inFileMask, dst_path=outDir, dst_crs=epsg_out)
 
     # Get the moving window
     movWin = getMovingWindow_rast(sonRast=mosaic_reproj, windowSize=windowSize, windowStride_m=windowStride_m)
