@@ -52,7 +52,7 @@ def doMosaic2tile(inFile: str,
         
     # Get the moving window
     movWin = getMovingWindow_rast(sonRast=mosaic_reproj, windowSize=windowSize, windowStride_m=windowStride_m)
-
+    
     ########################
     # Optimize moving window 
     # ## by subsetting to only those that intersect the mask_reproj
@@ -116,7 +116,18 @@ def doMosaic2tile(inFile: str,
 
     # Do moving window
     total_win = len(movWin)
+
+    # Run window 0 serially first so any exception/diagnostic prints are visible
+    # (joblib child-process stdout is suppressed)
+    if total_win > 0:
+        _diag = doMovWin(0, movWin.iloc[0], mosaic_reproj, target_size, outDir, outName, minArea_percent, windowSize)
+        print(f'[mosaic2tile diag] window 0 result: {"accepted" if _diag is not None else "rejected"}')
+
     r = Parallel(n_jobs=threadCnt)(delayed(doMovWin)(i, movWin.iloc[i], mosaic_reproj, target_size, outDir, outName, minArea_percent, windowSize) for i in tqdm(range(total_win)))
+
+    n_accepted = sum(1 for v in r if v is not None)
+    n_rejected = sum(1 for v in r if v is None)
+    print(f'[mosaic2tile diag] accepted={n_accepted}  rejected={n_rejected}  minArea_percent={minArea_percent}')
 
     sampleInfoAll = []
     # sampleInfoAll += r
@@ -125,6 +136,8 @@ def doMosaic2tile(inFile: str,
             sampleInfoAll.append(v)
 
     dfAll = pd.DataFrame(sampleInfoAll)
+
+    print('\nGenerated {} tiles.'.format(len(dfAll)))
 
     if del_reproj:
         os.remove(mosaic_reproj)
