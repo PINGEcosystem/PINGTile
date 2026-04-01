@@ -3,9 +3,16 @@
 
 Utility to tile sonar mosaics and maps.
 
-**UNDER CONSTRUCTION**
+## Table of Contents
 
-Check back soon....
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Input and Output Expectations](#input-and-output-expectations)
+- [Usage](#usage)
+- [Parameter Reference](#parameter-reference)
+- [Expected Output Layout](#expected-output-layout)
+- [Troubleshooting](#troubleshooting)
+- [Upload Dataset to Roboflow](#upload-dataset-to-roboflow)
 
 ## Installation
 
@@ -19,6 +26,31 @@ Check back soon....
     ```
     python -m pinginstaller pingtile
     ```
+
+## Quick Start
+
+1. Create a working folder with:
+     - a raster mosaic directory (for example, `*.tif` sonar files)
+     - a polygon label file (for example, `*.shp`)
+2. Use the script in [Usage](#usage) as your starter script.
+3. Update the Parameters block values for your paths, class mapping, and tile settings.
+4. Select the `pingtile` interpreter/environment in VS Code.
+5. Run the script with `F5`.
+
+## Input and Output Expectations
+
+- Sonar inputs:
+    - GeoTIFF rasters (`.tif` or `.tiff`) discovered recursively under `sonarDir`.
+- Label inputs:
+    - Vector polygons from `inFileMask` (for example, Shapefile).
+    - The class field must exist and match `classFieldName`.
+- CRS/projection:
+    - Inputs are reprojected to `epsg_out` for processing.
+- Outputs:
+    - Tiled images in `images`.
+    - Tiled label rasters in `labels`.
+    - Optional plots in `plots`.
+    - Optional COCO JSON in `json/_annotations.coco.json`.
 
 ## Usage
 
@@ -36,13 +68,9 @@ Copyright (c) 2025 Cameron S. Bodine
 import os, sys
 from joblib import Parallel, delayed, cpu_count
 
-# Debug
-from imglbl2tile import doImgLbl2tile
-from utils import mask_to_coco_json
-
-# # For Package
-# from pingtile.imglbl2tile import doImgLbl2tile
-# from pingtile.utils import mask_to_coco_json
+# For Package
+from pingtile.imglbl2tile import doImgLbl2tile
+from pingtile.utils import mask_to_coco_json
 
 import rasterio as rio
 import json
@@ -275,6 +303,64 @@ lbl2COCO = True
 
 4. Ensure the `pingtile` environment is selected as the Interpreter [see this](https://stackoverflow.com/a/76289404).
 5. Run the script in debug mode by pressing `F5`.
+
+## Parameter Reference
+
+| Parameter | Type | Description | Typical Values |
+|---|---|---|---|
+| `map` | `str` | Path to vector labels file. | `Z:\...\labels.shp` |
+| `sonarDir` | `str` | Directory containing sonar rasters. | `Z:\...\mosaic` |
+| `outDirTop` | `str` | Root output directory. | `Z:\tmp\pingtile_test` |
+| `outName` | `str` | Prefix used in output naming/metadata. | `Hudson` |
+| `classCrossWalk` | `dict[str,int]` | Class name to class id mapping. | `{'U':1, 'G':2, ...}` |
+| `windowSize_m` | `list[tuple[int,int]]` | Tile window sizes to run. | `[(12,12), (18,18)]` |
+| `windowStride` | `int` | Window stride in meters. | `1` to `6` |
+| `classFieldName` | `str` | Label field name in the map file. | `Substrate_` |
+| `minArea_percent` | `float` | Minimum non-zero label fraction required to keep a tile. | `0.1` to `0.7` |
+| `target_size` | `tuple[int,int]` | Output tile dimensions. | `(512, 512)` |
+| `threadCnt` | `int` or `float` | Processing thread policy (`0`, `<0`, `<1`, `>=1`). | `0.75` |
+| `epsg_out` | `int` | Processing CRS EPSG code. | `32616` |
+| `doPlot` | `bool` | Enable generation of diagnostic plots. | `True` / `False` |
+| `lbl2COCO` | `bool` | Convert label outputs to COCO JSON. | `True` / `False` |
+
+## Expected Output Layout
+
+After running for multiple window sizes, the output directory will look similar to:
+
+```text
+outDirTop/
+    12_12/
+        images/
+        labels/
+        plots/
+        json/
+            _annotations.coco.json
+    18_18/
+        images/
+        labels/
+        plots/
+        json/
+            _annotations.coco.json
+```
+
+## Troubleshooting
+
+- No tiles generated:
+    - Lower `minArea_percent`.
+    - Confirm label polygons overlap the sonar raster extent.
+- Empty or sparse labels:
+    - Verify `classFieldName` exists in the label file.
+    - Confirm `classCrossWalk` keys match label attribute values.
+- CRS mismatch symptoms (offset labels/images):
+    - Ensure both raster and vector sources are georeferenced.
+    - Set `epsg_out` to a projected CRS appropriate for your area.
+- Slow execution:
+    - Reduce number of `windowSize_m` entries.
+    - Increase `windowStride`.
+    - Tune `threadCnt` (for example, `0.5` to `0.9`).
+- GDAL/raster I/O issues:
+    - Run from the `pingtile` conda environment.
+    - Confirm `rasterio` and GDAL are installed from compatible channels.
 
 ## Upload Dataset to Roboflow
 
