@@ -5,6 +5,7 @@ Copyright (c) 2025 Cameron S. Bodine
 #########
 # Imports
 import os, sys
+import inspect
 from osgeo import gdal, ogr, osr
 import rasterio as rio
 from rasterio.mask import mask
@@ -30,6 +31,91 @@ from shapely.wkt import loads
 
 from skimage.io import imsave, imread
 import matplotlib.pyplot as plt
+
+#========================================================
+def _configure_gdal_runtime():
+    """Set predictable GDAL behavior and locate GDAL data files when possible."""
+
+    # Keep backward-compatible behavior for current code paths.
+    gdal.DontUseExceptions()
+
+    if os.environ.get('GDAL_DATA'):
+        return
+
+    conda_prefix = os.environ.get('CONDA_PREFIX', '')
+    candidates = [
+        os.path.join(os.path.dirname(gdal.__file__), 'data', 'gdal'),
+        os.path.join(os.path.dirname(gdal.__file__), 'gdal-data'),
+        os.path.join(sys.prefix, 'Library', 'share', 'gdal'),
+        os.path.join(sys.prefix, 'share', 'gdal'),
+        os.path.join(conda_prefix, 'Library', 'share', 'gdal') if conda_prefix else '',
+        os.path.join(conda_prefix, 'share', 'gdal') if conda_prefix else '',
+    ]
+
+    for path in candidates:
+        if path and os.path.isdir(path):
+            os.environ['GDAL_DATA'] = path
+            break
+
+
+_configure_gdal_runtime()
+
+_REMOVE_SMALL_OBJECTS_PARAMS = inspect.signature(remove_small_objects).parameters
+_REMOVE_SMALL_HOLES_PARAMS = inspect.signature(remove_small_holes).parameters
+
+
+def _remove_small_objects_compat(ar, min_size, **kwargs):
+    """Call skimage.remove_small_objects across API versions without changing semantics."""
+
+    if 'max_size' in _REMOVE_SMALL_OBJECTS_PARAMS:
+        max_size = max(int(min_size) - 1, 0)
+        return remove_small_objects(ar, max_size=max_size, **kwargs)
+
+    return remove_small_objects(ar, min_size=min_size, **kwargs)
+
+
+def _remove_small_holes_compat(ar, area_threshold, **kwargs):
+    """Call skimage.remove_small_holes across API versions without changing semantics."""
+
+    if 'max_size' in _REMOVE_SMALL_HOLES_PARAMS:
+        max_size = max(int(area_threshold) - 1, 0)
+        return remove_small_holes(ar, max_size=max_size, **kwargs)
+
+    return remove_small_holes(ar, area_threshold=area_threshold, **kwargs)
+
+
+def _is_int_like(value) -> bool:
+    """Return True when the value can be interpreted as an integer."""
+
+    try:
+        int(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _get_class_name_map(config: dict) -> dict:
+    """Build a class-id to class-name mapping from legacy or Hugging Face configs."""
+
+    class_names = config.get('MY_CLASS_NAMES')
+    if isinstance(class_names, dict) and class_names:
+        return {str(int(key)): str(value) for key, value in class_names.items() if _is_int_like(key)}
+
+    raw_id2label = config.get('id2label')
+    if isinstance(raw_id2label, dict) and raw_id2label:
+        if all(_is_int_like(key) for key in raw_id2label) and all(isinstance(value, str) for value in raw_id2label.values()):
+            return {str(int(key)): value for key, value in raw_id2label.items()}
+        if all(isinstance(key, str) for key in raw_id2label) and all(_is_int_like(value) for value in raw_id2label.values()):
+            return {str(int(value)): key for key, value in raw_id2label.items()}
+
+    raw_label2id = config.get('label2id')
+    if isinstance(raw_label2id, dict) and raw_label2id:
+        if all(isinstance(key, str) for key in raw_label2id) and all(_is_int_like(value) for value in raw_label2id.values()):
+            return {str(int(value)): key for key, value in raw_label2id.items()}
+        if all(_is_int_like(key) for key in raw_label2id) and all(isinstance(value, str) for value in raw_label2id.values()):
+            return {str(int(key)): value for key, value in raw_label2id.items()}
+
+    raise ValueError('Could not derive class names from config file. Expected MY_CLASS_NAMES, id2label, or label2id.')
 
 #========================================================
 # def reproject_raster(src_path: str, 
@@ -782,27 +868,44 @@ def doMovWin(i: int,
         win_coords = win_coords[:-1]
         
         try:
-            clipped_mosaic, clipped_transform = mask(sonRast, [window_geom], crop=True, )
+            clipped_mosaic, clipped_transform = mask(sonRast, [window_geom], crop=True, filled=False)
 
+            # Work from the first band for tiling while preserving valid-data semantics.
             clipped_mosaic = clipped_mosaic[0, :, :]
+            clipped_data = clipped_mosaic.data
+            valid_mask = ~np.ma.getmaskarray(clipped_mosaic)
 
-            # Check if there is data in clipped mosaic
-            if np.any(clipped_mosaic > 0):
-                # There is data > 0 in the clipped mosaic
+            if sonRast.nodata is not None:
+                valid_mask &= (clipped_data != sonRast.nodata)
+
+            # np.isnan is only meaningful for floating-point dtypes
+            if np.issubdtype(clipped_data.dtype, np.floating):
+                valid_mask &= ~np.isnan(clipped_data)
+
+            # Check if there is any valid data in clipped mosaic.
+            if np.any(valid_mask):
                 # Resize to target_size
                 # clipped_raster_resized = resize(clipped_mosaic, target_size, preserve_range=True, anti_aliasing=True).astype('uint8')
-                clipped_raster_resized = clipped_mosaic
+                clipped_raster_resized = np.where(valid_mask, clipped_data, 0)
+
+                signal_mask = valid_mask & (clipped_raster_resized != 0)
 
                 # If reclassify is provided, reclassify the raster
                 if reclassify:
                     reclass_map = np.vectorize(reclassify.get)(clipped_raster_resized, clipped_raster_resized)
                     clipped_raster_resized = reclass_map.astype('uint8')
+                    signal_mask = valid_mask & (clipped_raster_resized != 0)
 
-                # Calculate the percentage of non-zero pixels
-                non_zero_percentage = np.count_nonzero(clipped_raster_resized) / clipped_raster_resized.size
+                # minArea_percent is defined by non-zero coverage, not just unmasked pixels.
+                non_zero_percentage = np.count_nonzero(signal_mask) / signal_mask.size
 
-                # Check if the cropped raster has any valid (non-zero) values
-                if clipped_raster_resized.any() and non_zero_percentage >= minArea_percent:
+                if i == 0:
+                    print(f'[doMovWin diag] window 0: dtype={clipped_data.dtype}, nodata={sonRast.nodata}, '
+                          f'valid_pix={np.count_nonzero(valid_mask)}/{valid_mask.size}, '
+                          f'non_zero_pct={non_zero_percentage:.3f}, threshold={minArea_percent}')
+
+                # Keep windows with enough valid data coverage.
+                if non_zero_percentage >= minArea_percent:
                         # Recalculate the transform for the resized raster
                     new_transform = rio.transform.from_bounds(
                         window_bounds[0], window_bounds[1], window_bounds[2], window_bounds[3],
@@ -844,13 +947,18 @@ def doMovWin(i: int,
                                     'geometry': movWin.geometry}
 
                     return sampleInfo
-                pass
+                # else: threshold not met — window rejected by minArea_percent
             else:
-                # No data > 0 in the clipped mosaic
-                pass
+                if i == 0:
+                    print(f'[doMovWin diag] window 0: NO valid pixels after masking '
+                          f'(dtype={clipped_data.dtype}, nodata={sonRast.nodata}, '
+                          f'shape={clipped_data.shape})')
 
-        except:
-            pass
+        except Exception as _e:
+            import traceback
+            if i < 3:
+                print(f'[doMovWin ERROR] window {i}: {_e}')
+                traceback.print_exc()
 
 #========================================================
 def avg_npz_files_batch(df: pd.DataFrame,
@@ -1238,7 +1346,7 @@ def filterLabel(l, min_size, pix_m, df=None):
     if lbl.max() <= 1:
         noSmall = lbl
     else:
-        noSmall = remove_small_objects(lbl, min_size)
+        noSmall = _remove_small_objects_compat(lbl, min_size)
 
     # Punch holes in original label
     holes = ~(noSmall==0)
@@ -1249,7 +1357,7 @@ def filterLabel(l, min_size, pix_m, df=None):
     # Convert l to binary
     binary_objects = l.astype(bool)
     # Remove the holes
-    binary_filled = remove_small_holes(binary_objects, min_size)
+    binary_filled = _remove_small_holes_compat(binary_objects, min_size)
     # Recover classification with holes filled
     objects_filled = watershed(binary_filled, l, mask=binary_filled)
 
@@ -1594,7 +1702,7 @@ def maps2Shp(map_files: list,
     # Open model configuration file
     with open(configFile) as file:
         config = json.load(file)
-    globals().update(config)
+    class_name_map = _get_class_name_map(config)
 
     # https://gis.stackexchange.com/questions/340284/converting-raster-pixels-to-polygons-with-gdal-python
     # Open raster
@@ -1627,7 +1735,7 @@ def maps2Shp(map_files: list,
 
     for feature in dst_layer:
         subID = str(int(feature.GetField('Substrate')))
-        subName = MY_CLASS_NAMES[subID]
+        subName = class_name_map.get(subID, subID)
         feature.SetField('Name', subName)
         dst_layer.SetFeature(feature)
 
