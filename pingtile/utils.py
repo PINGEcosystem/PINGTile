@@ -847,6 +847,7 @@ def doMovWin(i: int,
              minArea_percent: float,
              windowSize: tuple,
              reclassify: dict={},
+             save_rgb: bool = False,
              ):
 
     mosaicName = os.path.basename(mosaic)
@@ -868,10 +869,10 @@ def doMovWin(i: int,
         win_coords = win_coords[:-1]
         
         try:
-            clipped_mosaic, clipped_transform = mask(sonRast, [window_geom], crop=True, filled=False)
+            clipped_mosaic_all, clipped_transform = mask(sonRast, [window_geom], crop=True, filled=False)
 
             # Work from the first band for tiling while preserving valid-data semantics.
-            clipped_mosaic = clipped_mosaic[0, :, :]
+            clipped_mosaic = clipped_mosaic_all[0, :, :]
             clipped_data = clipped_mosaic.data
             valid_mask = ~np.ma.getmaskarray(clipped_mosaic)
 
@@ -919,19 +920,38 @@ def doMovWin(i: int,
                     else:
                         fileName = f"{mosaicName}_{windowSize[0]}m_{win_coords}"
                     out_raster_path = os.path.join(outSonDir, f"{fileName}.png")
-                    
-                    with rio.open(
-                        out_raster_path,
-                        'w',
-                        driver='GTiff',
-                        height=clipped_raster_resized.shape[0],
-                        width=clipped_raster_resized.shape[1],
-                        count=1,
-                        dtype=clipped_raster_resized.dtype,
-                        crs=sonRast.crs,
-                        transform=new_transform,
-                    ) as dst:
-                        dst.write(clipped_raster_resized, 1)
+
+                    if save_rgb and sonRast.count >= 3:
+                        # Save 3-band RGB output
+                        rgb_data = np.stack([
+                            np.where(valid_mask, clipped_mosaic_all[b].data, 0).astype(np.uint8)
+                            for b in range(3)
+                        ], axis=0)  # shape: (3, H, W)
+                        with rio.open(
+                            out_raster_path,
+                            'w',
+                            driver='GTiff',
+                            height=rgb_data.shape[1],
+                            width=rgb_data.shape[2],
+                            count=3,
+                            dtype=rgb_data.dtype,
+                            crs=sonRast.crs,
+                            transform=new_transform,
+                        ) as dst:
+                            dst.write(rgb_data)
+                    else:
+                        with rio.open(
+                            out_raster_path,
+                            'w',
+                            driver='GTiff',
+                            height=clipped_raster_resized.shape[0],
+                            width=clipped_raster_resized.shape[1],
+                            count=1,
+                            dtype=clipped_raster_resized.dtype,
+                            crs=sonRast.crs,
+                            transform=new_transform,
+                        ) as dst:
+                            dst.write(clipped_raster_resized, 1)
 
                     
 
@@ -1860,6 +1880,120 @@ def maps2Shp(map_files: list,
         #     file_path = os.path.join(outDir, outName+'_smoothed' + ext)
         #     if os.path.exists(file_path):
         #         os.remove(file_path)
+
+    return
+
+#========================================================
+def maps2Shp_rf(map_files: list,
+                outDir: str,
+                outName: str,
+                class_map: dict,
+                minPatchSize: float=1.0,
+                smoothShp: bool=False,
+                smoothTol_m: float=0.25
+                ):
+    """
+    Convert a list of georeferenced mask GeoTIFFs to a polygon shapefile.
+
+    Works like maps2Shp but accepts a class_map dict (e.g. {"0": "background", "1": "SAV"})
+    instead of a model config JSON file.  Intended for use with Roboflow-derived masks.
+    """
+
+    # Build a normalised str(int) -> str name mapping
+    class_name_map = {str(int(k)): str(v) for k, v in class_map.items()}
+
+    # Create vrt
+    outVRT = create_vrt(imgsToMosaic=map_files, outDir=outDir, outName=outName, bands=[1])
+
+    dst_layername = os.path.basename(outVRT).replace('.vrt', '')
+    dst_layername = dst_layername.replace('_raster_mosaic', '')
+    dst_layername = os.path.join(outDir, dst_layername)
+
+    src_ds = gdal.Open(outVRT)
+    srs = osr.SpatialReference()
+    srs.ImportFromWkt(src_ds.GetProjection())
+
+    srcband = src_ds.GetRasterBand(1)
+    drv = ogr.GetDriverByName("ESRI Shapefile")
+    dst_ds = drv.CreateDataSource(dst_layername + '.shp')
+    dst_layer = dst_ds.CreateLayer(dst_layername, srs=srs, geom_type=ogr.wkbMultiPolygon)
+
+    newField = ogr.FieldDefn('Substrate', ogr.OFTReal)
+    dst_layer.CreateField(newField)
+    gdal.Polygonize(srcband, None, dst_layer, 0, [], callback=None)
+
+    newField = ogr.FieldDefn('Name', ogr.OFTString)
+    newField.SetWidth(50)
+    dst_layer.CreateField(newField)
+
+    for feature in dst_layer:
+        subID = str(int(feature.GetField('Substrate')))
+        subName = class_name_map.get(subID, subID)
+        feature.SetField('Name', subName)
+        dst_layer.SetFeature(feature)
+
+    newField = ogr.FieldDefn('Area_m', ogr.OFTReal)
+    newField.SetWidth(32)
+    newField.SetPrecision(2)
+    dst_layer.CreateField(newField)
+
+    for feature in dst_layer:
+        geom = feature.GetGeometryRef()
+        area = geom.GetArea()
+        feature.SetField('Area_m', area)
+        dst_layer.SetFeature(feature)
+
+    # Delete NoData (class 0) polygons
+    layer = dst_ds.GetLayer()
+    layer.SetAttributeFilter('Substrate = 0')
+    for feat in layer:
+        layer.DeleteFeature(feat.GetFID())
+
+    dst_ds.SyncToDisk()
+    dst_ds = None
+    src_ds = None
+    dst_layer = None
+
+    os.remove(outVRT)
+
+    # Repair invalid geometries
+    print('Repairing invalid geometries...')
+    gdf = gpd.read_file(dst_layername + '.shp')
+    gdf['geometry'] = gdf.geometry.buffer(0)
+    gdf['geometry'] = gdf.geometry.make_valid()
+    gdf.to_file(dst_layername + '.shp')
+
+    if minPatchSize > 0:
+        print(f'\nRemoving patches smaller than {minPatchSize} square meters...')
+        dissolve_small_patches(
+            shp_path=dst_layername + '.shp',
+            out_path=os.path.join(outDir, outName + '_dissolved.shp'),
+            minPatchSize=minPatchSize,
+            area_field='Area_m',
+            max_iters=5,
+        )
+        for ext in ['.shp', '.shx', '.dbf', '.prj', '.cpg']:
+            file_path = dst_layername + ext
+            if os.path.exists(file_path):
+                os.remove(file_path)
+
+    if minPatchSize > 0:
+        gdf = gpd.read_file(os.path.join(outDir, outName + '_dissolved.shp'))
+    else:
+        gdf = gpd.read_file(dst_layername + '.shp')
+
+    if smoothShp:
+        print(f'\nSmoothing polygons with tolerance {smoothTol_m} meters...')
+        gdf['geometry'] = gdf.geometry.simplify_coverage(tolerance=smoothTol_m)
+        gdf['geometry'] = gdf.geometry.buffer(0)
+        gdf['geometry'] = gdf.geometry.make_valid()
+        gdf = gdf.explode(index_parts=False).reset_index(drop=True)
+        gdf.to_file(os.path.join(outDir, outName + '_final.shp'))
+        if minPatchSize > 0:
+            for ext in ['.shp', '.shx', '.dbf', '.prj', '.cpg']:
+                file_path = os.path.join(outDir, outName + '_dissolved' + ext)
+                if os.path.exists(file_path):
+                    os.remove(file_path)
 
     return
 

@@ -26,7 +26,8 @@ def doMosaic2tile(inFile: str,
                   epsg_out: int=4326,
                   threadCnt: int=1,
                   target_size: list=[512,512],
-                  minArea_percent: float=0.5
+                  minArea_percent: float=0.5,
+                  save_rgb: bool=False,
                   ):
 
     '''
@@ -120,10 +121,10 @@ def doMosaic2tile(inFile: str,
     # Run window 0 serially first so any exception/diagnostic prints are visible
     # (joblib child-process stdout is suppressed)
     if total_win > 0:
-        _diag = doMovWin(0, movWin.iloc[0], mosaic_reproj, target_size, outDir, outName, minArea_percent, windowSize)
+        _diag = doMovWin(0, movWin.iloc[0], mosaic_reproj, target_size, outDir, outName, minArea_percent, windowSize, save_rgb=save_rgb)
         print(f'[mosaic2tile diag] window 0 result: {"accepted" if _diag is not None else "rejected"}')
 
-    r = Parallel(n_jobs=threadCnt)(delayed(doMovWin)(i, movWin.iloc[i], mosaic_reproj, target_size, outDir, outName, minArea_percent, windowSize) for i in tqdm(range(total_win)))
+    r = Parallel(n_jobs=threadCnt)(delayed(doMovWin)(i, movWin.iloc[i], mosaic_reproj, target_size, outDir, outName, minArea_percent, windowSize, save_rgb=save_rgb) for i in tqdm(range(total_win)))
 
     n_accepted = sum(1 for v in r if v is not None)
     n_rejected = sum(1 for v in r if v is None)
