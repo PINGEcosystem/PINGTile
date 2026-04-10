@@ -47,7 +47,7 @@ def doImgLbl2tile(inFileSonar: str,
 
     # Reproject raster to epsg_out (if necessary)
     if bandCnt >= 3:
-        mosaic_reproj = reproject_raster_keep_bands(src_path=inFileSonar, dst_dir=outDir, dst_crs=epsg_out)
+        mosaic_reproj, _ = reproject_raster_keep_bands(src_path=inFileSonar, dst_dir=outDir, dst_crs=epsg_out)
     else:
         mosaic_reproj, _ = reproject_raster_gray(src_path=inFileSonar, dst_path=outDir, dst_crs=epsg_out)
 

@@ -277,7 +277,7 @@ def reproject_raster_keep_bands(
     base = os.path.splitext(os.path.basename(src_path))[0]
     out_path = os.path.join(dst_dir, f"{base}_reproj.tif")
     if os.path.exists(out_path) and not overwrite:
-        return out_path
+        return out_path, False
     os.makedirs(dst_dir, exist_ok=True)
 
     with rio.open(src_path) as src:
@@ -288,7 +288,7 @@ def reproject_raster_keep_bands(
         if same_crs and cell_size is None:
             # Just copy
             shutil.copy2(src_path, out_path)
-            return out_path
+            return out_path, False
 
         dst_bounds = rio.warp.transform_bounds(src_crs, dst_crs_obj, *src.bounds)
 
@@ -331,7 +331,7 @@ def reproject_raster_keep_bands(
         if src.nodata is not None:
             dst.nodata = src.nodata
 
-    return out_path
+    return out_path, True
 
 #========================================================
 
