@@ -10,7 +10,9 @@ import os, sys
 from joblib import Parallel, delayed, cpu_count
 from PIL import Image
 
-# # Debug
+# Debug
+# Add current directory to path for testing
+sys.path.append(os.path.dirname(__file__))
 # from imglbl2tile import doImgLbl2tile
 # from utils import mask_to_coco_json
 
@@ -24,18 +26,24 @@ import json
 ############
 # Parameters
 
-map = r"Z:\scratch\2023_N_CBB_0511_Line2\PINGTile_MinClasses_2023_N_Line2_0511.shp"
-sonarDir = r"Z:\scratch\2023_N_CBB_0511_Line2"
+# Map can be specified as a directory containing all map files, or a single map file to use for all mosaics.
+map = r"Z:\UDEL\Projects\MonStur\ModelingWithStephi\datasets\mosaic_shp"
 
-outDirTop = r'Z:\scratch\Delaware_Catherine_Test'
-outName = 'Delaware_test'
+# Sonar Directory can be specified as a directory containing all sonar files, or a single sonar file to process (if map is a single file).
+sonarDir = r"Z:\UDEL\Projects\MonStur\ModelingWithStephi\datasets\mosaic_shp"
+
+outDirTop = r'Z:\UDEL\Projects\MonStur\ModelingWithStephi\datasets'
+outName = 'Danube_Batch_Test'
 
 classCrossWalk = {
-    'Background': 0,
-    'Fine Substrates': 1,
-    'Coarse Substrates': 2,
-    'Bedrock With Cover': 3,
-    'Exposed Bedrock': 4,
+    'background': 0,
+    'fines': 1,
+    'sand': 2,
+    'gravelf': 3,
+    'gravelc': 4,
+    'boulder': 5,
+    'bedrock': 6,
+    'mask': 255
 }
 
 windowSize_m = [
@@ -45,11 +53,11 @@ windowSize_m = [
                 ]
 
 windowStride = 12
-classFieldName = 'CMECS'
+classFieldName = 'subs_dom'
 minArea_percent = 0.75
 target_size = (512, 512) #(1024, 1024)
 threadCnt = 0.75
-epsg_out = 32618
+epsg_out = 32633
 doPlot = True
 lbl2COCO = True
 
@@ -88,6 +96,47 @@ for root, dirs, files in os.walk(sonarDir):
             sonarFiles.append(os.path.join(root, file))
 
 print(f"Found {len(sonarFiles)} sonar files for processing.")
+if len(sonarFiles) == 0:
+    raise FileNotFoundError(f"No sonar files found under: {sonarDir}")
+
+
+# Resolve map input: either one map file for all mosaics, or directory of per-mosaic maps.
+map_is_dir = os.path.isdir(map)
+single_map_file = None
+map_lookup = {}
+
+if map_is_dir:
+    print(f"Map input mode: directory pairing from {map}")
+    map_exts = ('.shp', '.tif', '.tiff')
+    map_files = []
+    for root, dirs, files in os.walk(map):
+        for file in files:
+            if file.lower().endswith(map_exts):
+                map_files.append(os.path.join(root, file))
+
+    if len(map_files) == 0:
+        raise FileNotFoundError(f"No map files (*.shp, *.tif, *.tiff) found under: {map}")
+
+    duplicate_map_names = set()
+    for map_file in map_files:
+        base = os.path.splitext(os.path.basename(map_file))[0]
+        # Keep the first matching map per basename to avoid ambiguous pairing.
+        if base not in map_lookup:
+            map_lookup[base] = map_file
+        else:
+            duplicate_map_names.add(base)
+
+    print(f"Found {len(map_lookup)} map files for pairing.")
+    if duplicate_map_names:
+        print(
+            "WARNING: Found duplicate map basenames and kept first match for: "
+            + ", ".join(sorted(duplicate_map_names))
+        )
+else:
+    if not os.path.exists(map):
+        raise FileNotFoundError(f"Map path does not exist: {map}")
+    print(f"Map input mode: single map file applied to all mosaics: {map}")
+    single_map_file = map
 
 
 for windowSize in windowSize_m:
@@ -107,12 +156,32 @@ for windowSize in windowSize_m:
         os.makedirs(outMaskDir)
         os.makedirs(pltDir)
 
+    processed_cnt = 0
+    skipped_cnt = 0
+
+    print(f"\nStarting tiling for window size {windowSize}...\n")
+
     for sonarFile in sonarFiles:
 
-        print(f"\nProcessing {os.path.basename(sonarFile)} with windowSize: {windowSize} and windowStride_m: {windowStride_m}...\n")
+        sonar_base = os.path.splitext(os.path.basename(sonarFile))[0]
+
+        if map_is_dir:
+            map_file = map_lookup.get(sonar_base)
+            if map_file is None:
+                print(f"Skipping {os.path.basename(sonarFile)}: no map found with matching name '{sonar_base}'.")
+                skipped_cnt += 1
+                continue
+        else:
+            map_file = single_map_file
+
+        print(
+            f"\nProcessing sonar={os.path.basename(sonarFile)} "
+            f"with map={os.path.basename(map_file)} "
+            f"windowSize={windowSize} windowStride_m={windowStride_m}...\n"
+        )
 
         doImgLbl2tile(inFileSonar=sonarFile,
-                      inFileMask=map,
+                      inFileMask=map_file,
                       outDir=outDir,
                       outName=outName,
                       epsg_out=epsg_out,
@@ -125,6 +194,13 @@ for windowSize in windowSize_m:
                       threadCnt=threadCnt,
                       doPlot=doPlot
                       )
+
+        processed_cnt += 1
+
+    print(
+        f"Completed window size {windowSize}: processed={processed_cnt}, "
+        f"skipped_missing_map={skipped_cnt}."
+    )
 
 # Convert masks to COCO format
 if lbl2COCO:
@@ -150,6 +226,11 @@ if lbl2COCO:
             for file in files:
                 if file.lower().endswith(('.tif', '.tiff', '.png', '.jpg', '.jpeg')):
                     maskFiles.append(os.path.join(root, file))
+
+        print(f"Found {len(maskFiles)} mask tiles for COCO conversion in {outMaskDir}.")
+        if len(maskFiles) == 0:
+            print("Skipping COCO conversion for this window size because no mask tiles were found.")
+            continue
 
         # maskFiles=maskFiles[:10] # Debug limit to 10 files
 
@@ -198,6 +279,8 @@ if lbl2COCO:
             json.dump(coco, f, indent=2)
         
         print(f"COCO JSON saved to {out_json} with {len(coco['images'])} images and {len(coco['annotations'])} annotations.")
+
+print("\nWorkflow complete.")
 
 
         
