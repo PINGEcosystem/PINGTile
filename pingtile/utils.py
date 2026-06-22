@@ -31,6 +31,7 @@ from shapely.wkt import loads
 
 from skimage.io import imsave, imread
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 
 #========================================================
 def _configure_gdal_runtime():
@@ -565,10 +566,51 @@ def doMovWin_imgshp(i: int,
 
     totalArea = clipped_hmDF['area'].sum()
 
-    if totalArea >= minArea:
+    if totalArea > 0:
 
-        # Calculate cross walk class
-        clipped_hmDF['value'] = clipped_hmDF[classFieldName].map(classCrossWalk)
+        # Calculate cross walk class. Try direct mapping first, then normalized string keys.
+        mapped_values = clipped_hmDF[classFieldName].map(classCrossWalk)
+        if mapped_values.isna().any():
+            normalized_crosswalk = {
+                str(k).strip().lower(): int(v)
+                for k, v in classCrossWalk.items()
+                if _is_int_like(v)
+            }
+            normalized_src = clipped_hmDF[classFieldName].astype(str).str.strip().str.lower()
+            mapped_values = mapped_values.where(mapped_values.notna(), normalized_src.map(normalized_crosswalk))
+
+        clipped_hmDF['value'] = pd.to_numeric(mapped_values, errors='coerce')
+
+        # Only valid habitat classes count toward minArea_percent.
+        # Ignore mask/shadow when deciding whether to export the tile.
+        mask_value = None
+        for k, v in classCrossWalk.items():
+            if str(k).strip().lower() == 'mask' and _is_int_like(v):
+                mask_value = int(v)
+                break
+
+        valid_class_values = set()
+        for k, v in classCrossWalk.items():
+            if not _is_int_like(v):
+                continue
+            cls_value = int(v)
+            cls_name = str(k).strip().lower()
+            if cls_value <= 0:
+                continue
+            if cls_name in ('mask', 'shadow'):
+                continue
+            valid_class_values.add(cls_value)
+
+        if not valid_class_values:
+            return
+
+        valid_area = clipped_hmDF.loc[
+            clipped_hmDF['value'].isin(valid_class_values),
+            'area'
+        ].sum()
+
+        if valid_area < minArea:
+            return
 
         # Calculate the total area for each class
         class_areas = clipped_hmDF.groupby(classFieldName)['area'].sum()
@@ -666,7 +708,12 @@ def doMovWin_imgshp(i: int,
 
                 # Rasterize the clipped_hmDF based on the "value" field 
                 # rasterize creates a single 2D output regardless of input bands
-                shapes = ((geom, value) for geom, value in zip(clipped_hmDF.geometry, clipped_hmDF['value']))
+                valid_hm = clipped_hmDF[clipped_hmDF['value'].notna()].copy()
+                if valid_hm.empty:
+                    return
+
+                valid_hm['value'] = valid_hm['value'].astype('uint8')
+                shapes = ((geom, value) for geom, value in zip(valid_hm.geometry, valid_hm['value']))
                 rasterized_hmDF = rio.features.rasterize(
                     shapes,
                     out_shape=(raster_height, raster_width),
@@ -681,24 +728,8 @@ def doMovWin_imgshp(i: int,
                 # Mask the habitat map
                 clipped_raster_resized = (clipped_raster_resized * clipped_raster_mask).astype('uint8')
 
-                lowercase_keys = [k.lower() for k in classCrossWalk.keys()]
-                if 'shadow' in lowercase_keys:
-
-                    ## Start shadow processing ##
-
-                    # Make habitat map mask - areas with no habitat get shadow class
-                    habitat_map_mask = np.where(clipped_raster_resized > 0, 0, 1).astype('uint8')
-
-                    # Set the shadow value from the class crosswalk and set as uint8
-                    shadow_value = np.uint8(classCrossWalk['Shadow'])
-
-                    # Apply shadow value to habitat map where habitat map mask is 1
-                    clipped_raster_resized = np.where(habitat_map_mask == 1, shadow_value, clipped_raster_resized)
-
-                    # Apply mask the habitat map again
-                    clipped_raster_resized = (clipped_raster_resized * clipped_raster_mask).astype('uint8')
-                    
-                    # End shadow processing ##
+                # Do not auto-fill unlabeled background with any class (e.g., mask/shadow).
+                # This preserves explicit class labels and keeps unlabeled pixels as 0.
 
 
                 # Save the rasterized habitat map
@@ -742,32 +773,79 @@ def doMovWin_imgshp(i: int,
                         img = imread(img_f)
                         lbl = imread(lbl_f)
 
-                        # Handle both 1-band and 3-band imagery for plotting
-                        if img.ndim == 3 and img.shape[2] == 3:
-                            # RGB image
-                            plt.imshow(img)
+                        # Build RGB base image for deterministic compositing.
+                        if img.ndim == 3 and img.shape[2] >= 3:
+                            base_rgb = img[:, :, :3].astype('float32')
                         else:
-                            # Grayscale image
-                            plt.imshow(img, cmap='gray')
+                            img2d = np.squeeze(img)
+                            if img2d.ndim != 2:
+                                img2d = img2d[:, :, 0]
+                            base_rgb = np.repeat(img2d[:, :, None], 3, axis=2).astype('float32')
 
-                        #blue,red, yellow,green, etc
-                        class_label_colormap = ['#3366CC','#DC3912','#FF9900','#109618','#990099','#0099C6','#DD4477',
-                                                '#66AA00','#B82E2E', '#316395','#0d0887', '#46039f', '#7201a8',
-                                                '#9c179e', '#bd3786', '#d8576b', '#ed7953', '#fb9f3a', '#fdca26', '#f0f921']
+                        # Build a high-contrast class palette for clearer plots.
+                        # Background remains transparent in the overlay.
+                        label_img = np.squeeze(lbl)
+                        if label_img.ndim != 2:
+                            label_img = label_img[:, :, 0]
 
-                        # Handle both 1-band and 3-band imagery for masking
-                        if img.ndim == 3:
-                            # RGB image: create mask from first band
-                            img_mask = img[:,:,0] == 0
-                        else:
-                            # Grayscale image
-                            img_mask = img[:,:] == 0
+                        class_color_map = {0: '#000000'}
 
-                        color_label = label_to_colors(lbl, img_mask,
-                                            alpha=128, colormap=class_label_colormap,
-                                                color_class_offset=0, do_alpha=False)
+                        # Build class colors dynamically so plotting works with any class count.
+                        # Keep mask/shadow neutral; assign vivid colors to all other classes.
+                        value_to_name = {}
+                        value_to_display = {}
+                        for cls_name, cls_value in classCrossWalk.items():
+                            if _is_int_like(cls_value):
+                                cls_val = int(cls_value)
+                                value_to_name[cls_val] = str(cls_name).strip().lower()
+                                value_to_display[cls_val] = str(cls_name).strip()
 
-                        plt.imshow(color_label,  alpha=0.5)
+                        for cls_value, cls_name in value_to_name.items():
+                            if cls_name in ('mask', 'shadow'):
+                                class_color_map[cls_value] = '#9E9E9E'
+
+                        dynamic_palette = [
+                            '#0072B2', '#E69F00', '#009E73', '#CC79A7', '#D55E00', '#56B4E9',
+                            '#F0E442', '#332288', '#44AA99', '#117733', '#999933', '#AA4499',
+                            '#88CCEE', '#882255', '#DDCC77', '#AA3377', '#66CCEE', '#228833',
+                            '#4477AA', '#EE6677', '#BBBBBB', '#77AADD', '#EE8866', '#44BB99'
+                        ]
+
+                        valid_values = sorted(
+                            v for v, n in value_to_name.items()
+                            if v > 0 and n not in ('mask', 'shadow')
+                        )
+                        for idx, cls_value in enumerate(valid_values):
+                            class_color_map[cls_value] = dynamic_palette[idx % len(dynamic_palette)]
+
+                        color_label = np.zeros(label_img.shape + (3,), dtype='uint8')
+                        for class_value, hex_color in class_color_map.items():
+                            rgb = tuple(fromhex(hex_color.replace('#', '')[j:j+2]) for j in (0, 2, 4))
+                            color_label[label_img == class_value] = rgb
+
+                        # Compose overlay directly so colors remain visible across matplotlib backends.
+                        alpha_mask = np.zeros(label_img.shape, dtype='float32')
+                        alpha_mask[label_img > 0] = 0.50
+                        alpha_mask[label_img == 255] = 0.45
+                        alpha_mask = alpha_mask[:, :, None]
+
+                        composite = ((1.0 - alpha_mask) * base_rgb) + (alpha_mask * color_label.astype('float32'))
+
+                        # Build legend entries for classes present in this tile.
+                        present_values = [
+                            int(v) for v in np.unique(label_img)
+                            if int(v) > 0 and int(v) in class_color_map
+                        ]
+                        legend_handles = []
+                        for class_value in sorted(present_values):
+                            class_name = value_to_display.get(class_value, f'class_{class_value}')
+                            legend_handles.append(
+                                Patch(
+                                    facecolor=class_color_map[class_value],
+                                    edgecolor='black',
+                                    label=f'{class_name} ({class_value})'
+                                )
+                            )
 
                         file = os.path.basename(img_f)
                         out_file = os.path.join(outPltDir, file)
@@ -775,10 +853,25 @@ def doMovWin_imgshp(i: int,
                         # Ensure plot directory exists
                         os.makedirs(outPltDir, exist_ok=True)
 
-                        plt.axis('off')
-                        plt.title(file)
-                        plt.savefig(out_file, dpi=200, bbox_inches='tight')
-                        plt.close('all')
+                        fig, ax = plt.subplots(figsize=(8, 6))
+                        ax.imshow(composite.astype('uint8'))
+                        ax.axis('off')
+                        ax.set_title(file)
+
+                        if legend_handles:
+                            ax.legend(
+                                handles=legend_handles,
+                                loc='center left',
+                                bbox_to_anchor=(1.02, 0.5),
+                                title='Classes',
+                                frameon=True,
+                                borderaxespad=0.0,
+                                fontsize=7,
+                                title_fontsize=8
+                            )
+
+                        fig.savefig(out_file, dpi=200, bbox_inches='tight', pad_inches=0.1)
+                        plt.close(fig)
                     except Exception as e:
                         print(f"[ERROR] Exception in plotting: {str(e)}")
                         import traceback

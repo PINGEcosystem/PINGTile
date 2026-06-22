@@ -33,7 +33,7 @@ map = r"Z:\UDEL\Projects\MonStur\ModelingWithStephi\datasets\mosaic_shp"
 sonarDir = r"Z:\UDEL\Projects\MonStur\ModelingWithStephi\datasets\mosaic_shp"
 
 outDirTop = r'Z:\UDEL\Projects\MonStur\ModelingWithStephi\datasets'
-outName = 'Danube_Batch_Test'
+outName = 'Danube_Mask_Test'
 
 classCrossWalk = {
     'background': 0,
