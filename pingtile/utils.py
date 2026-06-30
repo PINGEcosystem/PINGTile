@@ -527,7 +527,8 @@ def doMovWin_imgshp(i: int,
                  minArea_percent: float,
                  windowSize: tuple,
                  classCrossWalk: dict={},
-                 doPlot: bool=False
+                 doPlot: bool=False,
+                 allowNoMapTiles: bool=False
                  ):
 
     minArea = minArea_percent * windowSize[0]*windowSize[1]
@@ -565,6 +566,8 @@ def doMovWin_imgshp(i: int,
     clipped_hmDF['area'] = clipped_hmDF.geometry.area
 
     totalArea = clipped_hmDF['area'].sum()
+    export_empty_label = False
+    class_areas = {}
 
     if totalArea > 0:
 
@@ -602,7 +605,9 @@ def doMovWin_imgshp(i: int,
             valid_class_values.add(cls_value)
 
         if not valid_class_values:
-            return
+            if not allowNoMapTiles:
+                return
+            export_empty_label = True
 
         valid_area = clipped_hmDF.loc[
             clipped_hmDF['value'].isin(valid_class_values),
@@ -610,279 +615,271 @@ def doMovWin_imgshp(i: int,
         ].sum()
 
         if valid_area < minArea:
-            return
+            if not allowNoMapTiles:
+                return
+            export_empty_label = True
 
-        # Calculate the total area for each class
-        class_areas = clipped_hmDF.groupby(classFieldName)['area'].sum()
-        class_areas /= totalArea
+        if not export_empty_label:
+            # Calculate the total area for each class
+            class_areas = clipped_hmDF.groupby(classFieldName)['area'].sum()
+            class_areas /= totalArea
 
-        class_areas = class_areas.to_dict()
+            class_areas = class_areas.to_dict()
+    elif not allowNoMapTiles:
+        return
+    else:
+        export_empty_label = True
 
-        # Clip the raster using the window geometry
-        try:
-            raster_bounds = box(*sonRast.bounds)
-            if not raster_bounds.intersects(window_geom):
-                return  # window is completely outside the raster; skip it
+    # Clip the raster using the window geometry
+    try:
+        raster_bounds = box(*sonRast.bounds)
+        if not raster_bounds.intersects(window_geom):
+            return  # window is completely outside the raster; skip it
 
-            clipped_raster_orig, clipped_transform = mask(sonRast, [window_geom], crop=True)
-            
-            # Handle band count: limit to 3 if >= 3, keep as 1 if 1
-            num_bands = clipped_raster_orig.shape[0]
-            
+        clipped_raster_orig, clipped_transform = mask(sonRast, [window_geom], crop=True, filled=False)
+
+        # Handle band count: limit to 3 if >= 3, keep as 1 if 1
+        num_bands = clipped_raster_orig.shape[0]
+
+        if num_bands == 1:
+            # Single band: shape is (1, height, width) -> (height, width)
+            band = clipped_raster_orig[0]
+            valid_data_mask = ~np.ma.getmaskarray(band)
+            clipped_raster_2d = np.where(valid_data_mask, np.ma.getdata(band), 0)
+        elif num_bands >= 3:
+            # Three or more bands: take first 3 bands
+            clipped_raster_2d = []
+            for b in range(3):
+                band = clipped_raster_orig[b]
+                band_mask = ~np.ma.getmaskarray(band)
+                clipped_raster_2d.append(np.where(band_mask, np.ma.getdata(band), 0))
+            clipped_raster_2d = np.asarray(clipped_raster_2d)
+            valid_data_mask = ~np.ma.getmaskarray(clipped_raster_orig[0])
+            num_bands = 3
+        else:
+            # 2 bands: keep as is
+            clipped_raster_2d = []
+            for b in range(2):
+                band = clipped_raster_orig[b]
+                band_mask = ~np.ma.getmaskarray(band)
+                clipped_raster_2d.append(np.where(band_mask, np.ma.getdata(band), 0))
+            clipped_raster_2d = np.asarray(clipped_raster_2d)
+            valid_data_mask = ~np.ma.getmaskarray(clipped_raster_orig[0])
+
+        # Resize to target_size
+        if num_bands == 1:
+            # For single band, resize is straightforward
+            clipped_raster_resized = resize(clipped_raster_2d, target_size, preserve_range=True, anti_aliasing=True).astype('uint8')
+        else:
+            # For multi-band (2 or 3), handle as multi-band
+            # Transpose to (height, width, bands) for resize, then transpose back
+            clipped_raster_transposed = np.transpose(clipped_raster_2d, (1, 2, 0))
+            clipped_raster_resized_transposed = resize(clipped_raster_transposed, target_size + (num_bands,), preserve_range=True, anti_aliasing=True).astype('uint8')
+            clipped_raster_resized = np.transpose(clipped_raster_resized_transposed, (2, 0, 1))
+
+        # Calculate the percentage of non-zero pixels (use first band for consistency).
+        # This preserves prior behavior for rejecting no-coverage / nodata-only windows.
+        if num_bands == 1:
+            valid_data_percentage = np.count_nonzero(clipped_raster_resized) / clipped_raster_resized.size
+        else:
+            valid_data_percentage = np.count_nonzero(clipped_raster_resized[0]) / (clipped_raster_resized.shape[1] * clipped_raster_resized.shape[2])
+
+        # Check if the cropped raster has enough valid sonar coverage.
+        if valid_data_percentage >= minArea_percent:
+
+
+            # Recalculate the transform for the resized raster
+            new_transform = rio.transform.from_bounds(
+                window_bounds[0], window_bounds[1], window_bounds[2], window_bounds[3],
+                target_size[1], target_size[0]
+            )
+
+            # Save the clipped raster and shapefile
+            fileName = f"{outName}_{mosaicName}_{windowSize[0]}m_{win_coords}"
+            out_raster_path = os.path.join(outSonDir, f"{fileName}.png")
+            # out_shapefile_path = os.path.join(outMaskDir, f"{fileName}.shp")
+
+            # Create a mask from clipped_raster_resized (use first band for mask)
             if num_bands == 1:
-                # Single band: shape is (1, height, width) -> (height, width)
-                clipped_raster_2d = clipped_raster_orig[0]
-            elif num_bands >= 3:
-                # Three or more bands: take first 3 bands
-                clipped_raster_2d = clipped_raster_orig[:3]
-                num_bands = 3
+                clipped_raster_mask = np.where(clipped_raster_resized > 0, 1, 0)
             else:
-                # 2 bands: keep as is
-                clipped_raster_2d = clipped_raster_orig
+                clipped_raster_mask = np.where(clipped_raster_resized[0] > 0, 1, 0)
 
-            # Resize to target_size
-            if num_bands == 1:
-                # For single band, resize is straightforward
-                clipped_raster_resized = resize(clipped_raster_2d, target_size, preserve_range=True, anti_aliasing=True).astype('uint8')
-            else:
-                # For multi-band (2 or 3), handle as multi-band
-                # Transpose to (height, width, bands) for resize, then transpose back
-                clipped_raster_transposed = np.transpose(clipped_raster_2d, (1, 2, 0))
-                clipped_raster_resized_transposed = resize(clipped_raster_transposed, target_size + (num_bands,), preserve_range=True, anti_aliasing=True).astype('uint8')
-                clipped_raster_resized = np.transpose(clipped_raster_resized_transposed, (2, 0, 1))
-
-            # Calculate the percentage of non-zero pixels (use first band for consistency)
-            if num_bands == 1:
-                non_zero_percentage = np.count_nonzero(clipped_raster_resized) / clipped_raster_resized.size
-            else:
-                # For multi-band, use first band to match 1-band behavior
-                non_zero_percentage = np.count_nonzero(clipped_raster_resized[0]) / (clipped_raster_resized.shape[1] * clipped_raster_resized.shape[2])
-
-            # Check if the cropped raster has any valid (non-zero) values
-            if clipped_raster_resized.any() and non_zero_percentage >= minArea_percent:
-
-
-                # Recalculate the transform for the resized raster
-                new_transform = rio.transform.from_bounds(
-                    window_bounds[0], window_bounds[1], window_bounds[2], window_bounds[3],
-                    target_size[1], target_size[0]
-                )
-
-                # Save the clipped raster and shapefile
-                fileName = f"{outName}_{mosaicName}_{windowSize[0]}m_{win_coords}"
-                out_raster_path = os.path.join(outSonDir, f"{fileName}.png")
-                # out_shapefile_path = os.path.join(outMaskDir, f"{fileName}.shp")
-
-                # Create a mask from clipped_raster_resized (use first band for mask)
+            with rio.open(
+                out_raster_path,
+                'w',
+                driver='GTiff',
+                height=target_size[0],
+                width=target_size[1],
+                count=num_bands,
+                dtype=clipped_raster_resized.dtype,
+                crs=sonRast.crs,
+                transform=new_transform,
+            ) as dst:
                 if num_bands == 1:
-                    clipped_raster_mask = np.where(clipped_raster_resized > 0, 1, 0)
+                    dst.write(clipped_raster_resized, 1)
                 else:
-                    clipped_raster_mask = np.where(clipped_raster_resized[0] > 0, 1, 0)
+                    for b in range(num_bands):
+                        dst.write(clipped_raster_resized[b], b + 1)
 
-                with rio.open(
-                    out_raster_path,
-                    'w',
-                    driver='GTiff',
-                    height=target_size[0],
-                    width=target_size[1],
-                    count=num_bands,
-                    dtype=clipped_raster_resized.dtype,
-                    crs=sonRast.crs,
-                    transform=new_transform,
-                ) as dst:
-                    if num_bands == 1:
-                        dst.write(clipped_raster_resized, 1)
-                    else:
-                        for b in range(num_bands):
-                            dst.write(clipped_raster_resized[b], b + 1)
+            # clipped_hmDF.to_file(out_shapefile_path)
+            
+            del clipped_raster_resized
 
-                # clipped_hmDF.to_file(out_shapefile_path)
-                
-                del clipped_raster_resized
+            # Get spatial dimensions from the band-limited raster
+            if num_bands == 1:
+                raster_height, raster_width = clipped_raster_2d.shape
+            else:
+                _, raster_height, raster_width = clipped_raster_2d.shape
 
-                # Get spatial dimensions from the band-limited raster
-                if num_bands == 1:
-                    raster_height, raster_width = clipped_raster_2d.shape
-                else:
-                    _, raster_height, raster_width = clipped_raster_2d.shape
-
+            if export_empty_label:
+                clipped_raster_resized = np.zeros(target_size, dtype='uint8')
+            else:
                 # Rasterize the clipped_hmDF based on the "value" field 
                 # rasterize creates a single 2D output regardless of input bands
                 valid_hm = clipped_hmDF[clipped_hmDF['value'].notna()].copy()
                 if valid_hm.empty:
-                    return
+                    if not allowNoMapTiles:
+                        return
+                    clipped_raster_resized = np.zeros(target_size, dtype='uint8')
+                else:
+                    valid_hm['value'] = valid_hm['value'].astype('uint8')
+                    shapes = ((geom, value) for geom, value in zip(valid_hm.geometry, valid_hm['value']))
+                    rasterized_hmDF = rio.features.rasterize(
+                        shapes,
+                        out_shape=(raster_height, raster_width),
+                        transform=clipped_transform,
+                        fill=0,
+                        dtype='uint8'
+                    )
 
-                valid_hm['value'] = valid_hm['value'].astype('uint8')
-                shapes = ((geom, value) for geom, value in zip(valid_hm.geometry, valid_hm['value']))
-                rasterized_hmDF = rio.features.rasterize(
-                    shapes,
-                    out_shape=(raster_height, raster_width),
-                    transform=clipped_transform,
-                    fill=0,
-                    dtype='uint8'
-                )
+                    # Resize to target_size
+                    clipped_raster_resized = resize(rasterized_hmDF, target_size, order=0, preserve_range=True, clip=True).astype('uint8')
 
-                # Resize to target_size
-                clipped_raster_resized = resize(rasterized_hmDF, target_size, order=0, preserve_range=True, clip=True).astype('uint8')
+                    # Mask the habitat map
+                    clipped_raster_resized = (clipped_raster_resized * clipped_raster_mask).astype('uint8')
 
-                # Mask the habitat map
-                clipped_raster_resized = (clipped_raster_resized * clipped_raster_mask).astype('uint8')
+            plot_label_resized = clipped_raster_resized.copy()
+            if export_empty_label and doPlot:
+                valid_hm_plot = clipped_hmDF[clipped_hmDF['value'].notna()].copy()
+                if not valid_hm_plot.empty:
+                    valid_hm_plot['value'] = valid_hm_plot['value'].astype('uint8')
+                    plot_shapes = ((geom, value) for geom, value in zip(valid_hm_plot.geometry, valid_hm_plot['value']))
+                    rasterized_plot = rio.features.rasterize(
+                        plot_shapes,
+                        out_shape=(raster_height, raster_width),
+                        transform=clipped_transform,
+                        fill=0,
+                        dtype='uint8'
+                    )
+                    plot_label_resized = resize(
+                        rasterized_plot,
+                        target_size,
+                        order=0,
+                        preserve_range=True,
+                        clip=True
+                    ).astype('uint8')
+                    plot_label_resized = (plot_label_resized * clipped_raster_mask).astype('uint8')
 
-                # Do not auto-fill unlabeled background with any class (e.g., mask/shadow).
-                # This preserves explicit class labels and keeps unlabeled pixels as 0.
+            # Do not auto-fill unlabeled background with any class (e.g., mask/shadow).
+            # This preserves explicit class labels and keeps unlabeled pixels as 0.
 
+            # Save the rasterized habitat map
+            out_rasterized_path = os.path.join(outMaskDir, f"{fileName}.png")
+            with rio.open(
+                out_rasterized_path,
+                'w',
+                driver='GTiff',
+                height=clipped_raster_resized.shape[0],
+                width=clipped_raster_resized.shape[1],
+                count=1,
+                dtype=clipped_raster_resized.dtype,
+                crs=sonRast.crs,
+                transform=new_transform,
+            ) as dst:
+                dst.write(clipped_raster_resized, 1)
 
-                # Save the rasterized habitat map
-                out_rasterized_path = os.path.join(outMaskDir, f"{fileName}.png")
-                with rio.open(
-                    out_rasterized_path,
-                    'w',
-                    driver='GTiff',
-                    height=clipped_raster_resized.shape[0],
-                    width=clipped_raster_resized.shape[1],
-                    count=1,
-                    dtype=clipped_raster_resized.dtype,
-                    crs=sonRast.crs,
-                    transform=new_transform,
-                ) as dst:
-                    dst.write(clipped_raster_resized, 1)
+            # Store everythining in a dictionary
+            sampleInfo = {'mosaic': mosaic,
+                            'habitat': shp,
+                            'window_size': windowSize[0],
+                            'x_min': window_bounds[0],
+                            'y_min': window_bounds[1],
+                            'x_max': window_bounds[2],
+                            'y_max': window_bounds[3]}
+            
+            for k, v in class_areas.items():
+                sampleInfo[k] = v
 
-                # Store everythining in a dictionary
-                sampleInfo = {'mosaic': mosaic,
-                                'habitat': shp,
-                                'window_size': windowSize[0],
-                                'x_min': window_bounds[0],
-                                'y_min': window_bounds[1],
-                                'x_max': window_bounds[2],
-                                'y_max': window_bounds[3]}
-                
-                for k, v in class_areas.items():
-                    sampleInfo[k] = v
+            if doPlot:
+                try:
+                    img_f = out_raster_path
+                    lbl_f = out_rasterized_path
 
-                if doPlot:
-                    try:
-                        # Make a plot
-                        img_f = out_raster_path
-                        lbl_f = out_rasterized_path
+                    img = imread(img_f)
 
-                        if not os.path.exists(img_f):
-                            print(f"[WARNING] Image file not found: {img_f}")
-                        if not os.path.exists(lbl_f):
-                            print(f"[WARNING] Label file not found: {lbl_f}")
+                    if img.ndim == 3 and img.shape[2] >= 3:
+                        base_rgb = img[:, :, :3].astype('float32')
+                    else:
+                        img2d = np.squeeze(img)
+                        if img2d.ndim != 2:
+                            img2d = img2d[:, :, 0]
+                        base_rgb = np.repeat(img2d[:, :, None], 3, axis=2).astype('float32')
 
-                        img = imread(img_f)
+                    if export_empty_label:
+                        label_img = np.squeeze(plot_label_resized)
+                    else:
                         lbl = imread(lbl_f)
-
-                        # Build RGB base image for deterministic compositing.
-                        if img.ndim == 3 and img.shape[2] >= 3:
-                            base_rgb = img[:, :, :3].astype('float32')
-                        else:
-                            img2d = np.squeeze(img)
-                            if img2d.ndim != 2:
-                                img2d = img2d[:, :, 0]
-                            base_rgb = np.repeat(img2d[:, :, None], 3, axis=2).astype('float32')
-
-                        # Build a high-contrast class palette for clearer plots.
-                        # Background remains transparent in the overlay.
                         label_img = np.squeeze(lbl)
                         if label_img.ndim != 2:
                             label_img = label_img[:, :, 0]
 
-                        class_color_map = {0: '#000000'}
+                    class_color_map = {0: '#000000'}
+                    value_to_name = {}
+                    value_to_display = {}
+                    for cls_name, cls_value in classCrossWalk.items():
+                        if _is_int_like(cls_value):
+                            cls_val = int(cls_value)
+                            value_to_name[cls_val] = str(cls_name).strip().lower()
+                            value_to_display[cls_val] = str(cls_name).strip()
 
-                        # Build class colors dynamically so plotting works with any class count.
-                        # Keep mask/shadow neutral; assign vivid colors to all other classes.
-                        value_to_name = {}
-                        value_to_display = {}
-                        for cls_name, cls_value in classCrossWalk.items():
-                            if _is_int_like(cls_value):
-                                cls_val = int(cls_value)
-                                value_to_name[cls_val] = str(cls_name).strip().lower()
-                                value_to_display[cls_val] = str(cls_name).strip()
+                    dynamic_palette = [
+                        '#0072B2', '#E69F00', '#009E73', '#CC79A7', '#D55E00', '#56B4E9',
+                        '#F0E442', '#332288', '#44AA99', '#117733', '#999933', '#AA4499',
+                        '#88CCEE', '#882255', '#DDCC77', '#AA3377', '#66CCEE', '#228833',
+                        '#4477AA', '#EE6677', '#BBBBBB', '#77AADD', '#EE8866', '#44BB99'
+                    ]
+                    valid_values = sorted(v for v in value_to_name if v > 0)
+                    for idx, cls_value in enumerate(valid_values):
+                        class_color_map[cls_value] = dynamic_palette[idx % len(dynamic_palette)]
 
-                        for cls_value, cls_name in value_to_name.items():
-                            if cls_name in ('mask', 'shadow'):
-                                class_color_map[cls_value] = '#9E9E9E'
+                    color_label = np.zeros(label_img.shape + (3,), dtype='uint8')
+                    for class_value, hex_color in class_color_map.items():
+                        rgb = tuple(fromhex(hex_color.replace('#', '')[j:j+2]) for j in (0, 2, 4))
+                        color_label[label_img == class_value] = rgb
 
-                        dynamic_palette = [
-                            '#0072B2', '#E69F00', '#009E73', '#CC79A7', '#D55E00', '#56B4E9',
-                            '#F0E442', '#332288', '#44AA99', '#117733', '#999933', '#AA4499',
-                            '#88CCEE', '#882255', '#DDCC77', '#AA3377', '#66CCEE', '#228833',
-                            '#4477AA', '#EE6677', '#BBBBBB', '#77AADD', '#EE8866', '#44BB99'
-                        ]
+                    alpha_mask = np.zeros(label_img.shape, dtype='float32')
+                    alpha_mask[label_img > 0] = 0.50
+                    alpha_mask = alpha_mask[:, :, None]
+                    composite = ((1.0 - alpha_mask) * base_rgb) + (alpha_mask * color_label.astype('float32'))
 
-                        valid_values = sorted(
-                            v for v, n in value_to_name.items()
-                            if v > 0 and n not in ('mask', 'shadow')
-                        )
-                        for idx, cls_value in enumerate(valid_values):
-                            class_color_map[cls_value] = dynamic_palette[idx % len(dynamic_palette)]
+                    out_file = os.path.join(outPltDir, os.path.basename(img_f))
+                    os.makedirs(outPltDir, exist_ok=True)
+                    fig, ax = plt.subplots(figsize=(8, 6))
+                    ax.imshow(composite.astype('uint8'))
+                    ax.axis('off')
+                    ax.set_title(os.path.basename(img_f))
+                    fig.savefig(out_file, dpi=200, bbox_inches='tight', pad_inches=0.1)
+                    plt.close(fig)
+                except Exception as e:
+                    print(f"[ERROR] Exception in plotting: {str(e)}")
 
-                        color_label = np.zeros(label_img.shape + (3,), dtype='uint8')
-                        for class_value, hex_color in class_color_map.items():
-                            rgb = tuple(fromhex(hex_color.replace('#', '')[j:j+2]) for j in (0, 2, 4))
-                            color_label[label_img == class_value] = rgb
-
-                        # Compose overlay directly so colors remain visible across matplotlib backends.
-                        alpha_mask = np.zeros(label_img.shape, dtype='float32')
-                        alpha_mask[label_img > 0] = 0.50
-                        alpha_mask[label_img == 255] = 0.45
-                        alpha_mask = alpha_mask[:, :, None]
-
-                        composite = ((1.0 - alpha_mask) * base_rgb) + (alpha_mask * color_label.astype('float32'))
-
-                        # Build legend entries for classes present in this tile.
-                        present_values = [
-                            int(v) for v in np.unique(label_img)
-                            if int(v) > 0 and int(v) in class_color_map
-                        ]
-                        legend_handles = []
-                        for class_value in sorted(present_values):
-                            class_name = value_to_display.get(class_value, f'class_{class_value}')
-                            legend_handles.append(
-                                Patch(
-                                    facecolor=class_color_map[class_value],
-                                    edgecolor='black',
-                                    label=f'{class_name} ({class_value})'
-                                )
-                            )
-
-                        file = os.path.basename(img_f)
-                        out_file = os.path.join(outPltDir, file)
-
-                        # Ensure plot directory exists
-                        os.makedirs(outPltDir, exist_ok=True)
-
-                        fig, ax = plt.subplots(figsize=(8, 6))
-                        ax.imshow(composite.astype('uint8'))
-                        ax.axis('off')
-                        ax.set_title(file)
-
-                        if legend_handles:
-                            ax.legend(
-                                handles=legend_handles,
-                                loc='center left',
-                                bbox_to_anchor=(1.02, 0.5),
-                                title='Classes',
-                                frameon=True,
-                                borderaxespad=0.0,
-                                fontsize=7,
-                                title_fontsize=8
-                            )
-
-                        fig.savefig(out_file, dpi=200, bbox_inches='tight', pad_inches=0.1)
-                        plt.close(fig)
-                    except Exception as e:
-                        print(f"[ERROR] Exception in plotting: {str(e)}")
-                        import traceback
-                        traceback.print_exc()
-
-                return sampleInfo
-        except Exception as e:
-            print(f"[ERROR] Exception in doMovWin_imgshp: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            pass
+            return sampleInfo
+    except Exception as e:
+        print(f"[ERROR] Exception in doMovWin_imgshp: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        pass
 
 ##========================================================       
 def label_to_colors(

@@ -106,6 +106,7 @@ threadCnt = 0.75
 epsg_out = 32616
 doPlot = True
 lbl2COCO = True
+allowNoMapTiles = False  # Set True to also export sonar-covered tiles that have no map overlap.
 
 if not os.path.exists(outDirTop):
     os.makedirs(outDirTop)
@@ -175,7 +176,8 @@ for windowSize in windowSize_m:
                       minArea_percent=minArea_percent,
                       target_size=target_size,
                       threadCnt=threadCnt,
-                      doPlot=doPlot
+                      doPlot=doPlot,
+                      allowNoMapTiles=allowNoMapTiles
                       )
 
 # Convert masks to COCO format

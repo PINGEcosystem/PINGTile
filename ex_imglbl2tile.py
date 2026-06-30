@@ -27,39 +27,48 @@ import json
 # Parameters
 
 # Map can be specified as a directory containing all map files, or a single map file to use for all mosaics.
-map = r"Z:\UDEL\Projects\MonStur\ModelingWithStephi\datasets\mosaic_shp"
+map = r"Z:\scratch\ping_tile_test\shp\Model_Training_Substrate_Polygons_Export.shp"
 
 # Sonar Directory can be specified as a directory containing all sonar files, or a single sonar file to process (if map is a single file).
-sonarDir = r"Z:\UDEL\Projects\MonStur\ModelingWithStephi\datasets\mosaic_shp"
+sonarDir = r"Z:\scratch\ping_tile_test\mosaic"
 
-outDirTop = r'Z:\UDEL\Projects\MonStur\ModelingWithStephi\datasets'
-outName = 'Danube_Mask_Test'
+outDirTop = r'Z:\scratch\ping_tile_test\img_lbl'
+outName = 'shadow_test'
+
+# classCrossWalk = {
+#     'background': 0,
+#     'fines': 1,
+#     'sand': 2,
+#     'gravelf': 3,
+#     'gravelc': 4,
+#     'boulder': 5,
+#     'bedrock': 6,
+#     'mask': 255
+# }
 
 classCrossWalk = {
-    'background': 0,
-    'fines': 1,
-    'sand': 2,
-    'gravelf': 3,
-    'gravelc': 4,
-    'boulder': 5,
-    'bedrock': 6,
-    'mask': 255
+    '0':0,
+    'U':1,
+    'G':2,
+    'B_C':3,
+    'B':4
 }
 
 windowSize_m = [
                 # (12,12),
-                # (18,18),
-                (24,24),
+                (18,18),
+                # (24,24),
                 ]
 
 windowStride = 12
-classFieldName = 'subs_dom'
-minArea_percent = 0.75
+classFieldName = 'Substrate_'
+minArea_percent = 0.5
 target_size = (512, 512) #(1024, 1024)
 threadCnt = 0.75
-epsg_out = 32633
+epsg_out = 32615
 doPlot = True
 lbl2COCO = True
+allowNoMapTiles = False  # Set True to also export sonar-covered tiles that have no map overlap.
 
 if not os.path.exists(outDirTop):
     os.makedirs(outDirTop)
@@ -192,7 +201,8 @@ for windowSize in windowSize_m:
                       minArea_percent=minArea_percent,
                       target_size=target_size,
                       threadCnt=threadCnt,
-                      doPlot=doPlot
+                      doPlot=doPlot,
+                      allowNoMapTiles=allowNoMapTiles
                       )
 
         processed_cnt += 1

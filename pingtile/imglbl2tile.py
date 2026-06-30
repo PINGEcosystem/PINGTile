@@ -30,7 +30,8 @@ def doImgLbl2tile(inFileSonar: str,
                   minArea_percent: float=0.5,
                   target_size: tuple=(512,512),
                   threadCnt: int=4,
-                  doPlot: bool=False
+                  doPlot: bool=False,
+                  allowNoMapTiles: bool=False
                   ):
     
     '''
@@ -111,6 +112,6 @@ def doImgLbl2tile(inFileSonar: str,
     outPltDir = os.path.join(outDir, 'plots')
 
     if mask_reproj.lower().endswith('.shp'):
-        _ = Parallel(n_jobs=threadCnt)(delayed(doMovWin_imgshp)(i=i, movWin=movWin.iloc[i], mosaic=mosaic_reproj, shp=mask_reproj, target_size=target_size, outSonDir=outSonDir, outMaskDir=outMaskDir, outPltDir=outPltDir, outName=outName, classFieldName=classFieldName, minArea_percent=minArea_percent, windowSize=windowSize, classCrossWalk=classCrossWalk, doPlot=doPlot) for i in tqdm(range(total_win)))
+        _ = Parallel(n_jobs=threadCnt)(delayed(doMovWin_imgshp)(i=i, movWin=movWin.iloc[i], mosaic=mosaic_reproj, shp=mask_reproj, target_size=target_size, outSonDir=outSonDir, outMaskDir=outMaskDir, outPltDir=outPltDir, outName=outName, classFieldName=classFieldName, minArea_percent=minArea_percent, windowSize=windowSize, classCrossWalk=classCrossWalk, doPlot=doPlot, allowNoMapTiles=allowNoMapTiles) for i in tqdm(range(total_win)))
 
     return
