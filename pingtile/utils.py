@@ -605,9 +605,7 @@ def doMovWin_imgshp(i: int,
             valid_class_values.add(cls_value)
 
         if not valid_class_values:
-            if not allowNoMapTiles:
-                return
-            export_empty_label = True
+            return
 
         valid_area = clipped_hmDF.loc[
             clipped_hmDF['value'].isin(valid_class_values),
@@ -615,16 +613,13 @@ def doMovWin_imgshp(i: int,
         ].sum()
 
         if valid_area < minArea:
-            if not allowNoMapTiles:
-                return
-            export_empty_label = True
+            return
 
-        if not export_empty_label:
-            # Calculate the total area for each class
-            class_areas = clipped_hmDF.groupby(classFieldName)['area'].sum()
-            class_areas /= totalArea
+        # Calculate the total area for each class
+        class_areas = clipped_hmDF.groupby(classFieldName)['area'].sum()
+        class_areas /= totalArea
 
-            class_areas = class_areas.to_dict()
+        class_areas = class_areas.to_dict()
     elif not allowNoMapTiles:
         return
     else:
@@ -739,9 +734,7 @@ def doMovWin_imgshp(i: int,
                 # rasterize creates a single 2D output regardless of input bands
                 valid_hm = clipped_hmDF[clipped_hmDF['value'].notna()].copy()
                 if valid_hm.empty:
-                    if not allowNoMapTiles:
-                        return
-                    clipped_raster_resized = np.zeros(target_size, dtype='uint8')
+                    return
                 else:
                     valid_hm['value'] = valid_hm['value'].astype('uint8')
                     shapes = ((geom, value) for geom, value in zip(valid_hm.geometry, valid_hm['value']))

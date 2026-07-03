@@ -68,7 +68,7 @@ threadCnt = 0.75
 epsg_out = 32615
 doPlot = True
 lbl2COCO = True
-allowNoMapTiles = False  # Set True to also export sonar-covered tiles that have no map overlap.
+allowNoMapTiles = True  # Set True to also export sonar-covered tiles that have no map overlap.
 
 if not os.path.exists(outDirTop):
     os.makedirs(outDirTop)
