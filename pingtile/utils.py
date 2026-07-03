@@ -531,6 +531,9 @@ def doMovWin_imgshp(i: int,
                  allowNoMapTiles: bool=False
                  ):
 
+    def _skip(reason: str):
+        return {'status': 'skipped', 'reason': reason}
+
     minArea = minArea_percent * windowSize[0]*windowSize[1]
     
     mosaicName = os.path.basename(mosaic)
@@ -586,11 +589,22 @@ def doMovWin_imgshp(i: int,
 
         # Only valid habitat classes count toward minArea_percent.
         # Ignore mask/shadow when deciding whether to export the tile.
-        mask_value = None
+        mask_like_values = set()
         for k, v in classCrossWalk.items():
-            if str(k).strip().lower() == 'mask' and _is_int_like(v):
-                mask_value = int(v)
-                break
+            if not _is_int_like(v):
+                continue
+            cls_name = str(k).strip().lower()
+            if cls_name in ('mask', 'shadow'):
+                mask_like_values.add(int(v))
+
+        # Explicitly drop mask-only windows.
+        if mask_like_values:
+            mask_area = clipped_hmDF.loc[
+                clipped_hmDF['value'].isin(mask_like_values),
+                'area'
+            ].sum()
+            if np.isclose(mask_area, totalArea):
+                return _skip('mask_only')
 
         valid_class_values = set()
         for k, v in classCrossWalk.items():
@@ -604,24 +618,29 @@ def doMovWin_imgshp(i: int,
                 continue
             valid_class_values.add(cls_value)
 
-        if not valid_class_values:
-            return
+        valid_area = 0.0
+        if valid_class_values:
+            valid_area = clipped_hmDF.loc[
+                clipped_hmDF['value'].isin(valid_class_values),
+                'area'
+            ].sum()
 
-        valid_area = clipped_hmDF.loc[
-            clipped_hmDF['value'].isin(valid_class_values),
-            'area'
-        ].sum()
+        # If there is no mapped class coverage at all, optionally export as class 0.
+        if valid_area <= 0:
+            if not allowNoMapTiles:
+                return _skip('no_class_allow_disabled')
+            export_empty_label = True
+        elif valid_area < minArea:
+            return _skip('classified_below_min_area')
 
-        if valid_area < minArea:
-            return
+        if not export_empty_label:
+            # Calculate the total area for each class
+            class_areas = clipped_hmDF.groupby(classFieldName)['area'].sum()
+            class_areas /= totalArea
 
-        # Calculate the total area for each class
-        class_areas = clipped_hmDF.groupby(classFieldName)['area'].sum()
-        class_areas /= totalArea
-
-        class_areas = class_areas.to_dict()
+            class_areas = class_areas.to_dict()
     elif not allowNoMapTiles:
-        return
+        return _skip('no_map_overlap_allow_disabled')
     else:
         export_empty_label = True
 
@@ -629,7 +648,7 @@ def doMovWin_imgshp(i: int,
     try:
         raster_bounds = box(*sonRast.bounds)
         if not raster_bounds.intersects(window_geom):
-            return  # window is completely outside the raster; skip it
+            return _skip('outside_raster')  # window is completely outside the raster; skip it
 
         clipped_raster_orig, clipped_transform = mask(sonRast, [window_geom], crop=True, filled=False)
 
@@ -661,6 +680,16 @@ def doMovWin_imgshp(i: int,
             clipped_raster_2d = np.asarray(clipped_raster_2d)
             valid_data_mask = ~np.ma.getmaskarray(clipped_raster_orig[0])
 
+        # Resize valid-data footprint to target_size for coverage checks and label masking.
+        valid_data_mask_resized = resize(
+            valid_data_mask.astype('uint8'),
+            target_size,
+            order=0,
+            preserve_range=True,
+            anti_aliasing=False,
+            clip=True,
+        ).astype('uint8')
+
         # Resize to target_size
         if num_bands == 1:
             # For single band, resize is straightforward
@@ -672,12 +701,8 @@ def doMovWin_imgshp(i: int,
             clipped_raster_resized_transposed = resize(clipped_raster_transposed, target_size + (num_bands,), preserve_range=True, anti_aliasing=True).astype('uint8')
             clipped_raster_resized = np.transpose(clipped_raster_resized_transposed, (2, 0, 1))
 
-        # Calculate the percentage of non-zero pixels (use first band for consistency).
-        # This preserves prior behavior for rejecting no-coverage / nodata-only windows.
-        if num_bands == 1:
-            valid_data_percentage = np.count_nonzero(clipped_raster_resized) / clipped_raster_resized.size
-        else:
-            valid_data_percentage = np.count_nonzero(clipped_raster_resized[0]) / (clipped_raster_resized.shape[1] * clipped_raster_resized.shape[2])
+        # Measure sonar coverage by valid (non-nodata) footprint, not non-zero intensity.
+        valid_data_percentage = np.count_nonzero(valid_data_mask_resized) / valid_data_mask_resized.size
 
         # Check if the cropped raster has enough valid sonar coverage.
         if valid_data_percentage >= minArea_percent:
@@ -694,11 +719,8 @@ def doMovWin_imgshp(i: int,
             out_raster_path = os.path.join(outSonDir, f"{fileName}.png")
             # out_shapefile_path = os.path.join(outMaskDir, f"{fileName}.shp")
 
-            # Create a mask from clipped_raster_resized (use first band for mask)
-            if num_bands == 1:
-                clipped_raster_mask = np.where(clipped_raster_resized > 0, 1, 0)
-            else:
-                clipped_raster_mask = np.where(clipped_raster_resized[0] > 0, 1, 0)
+            # Use valid-data footprint for masking labels so valid zero-intensity sonar is retained.
+            clipped_raster_mask = valid_data_mask_resized
 
             with rio.open(
                 out_raster_path,
@@ -734,7 +756,7 @@ def doMovWin_imgshp(i: int,
                 # rasterize creates a single 2D output regardless of input bands
                 valid_hm = clipped_hmDF[clipped_hmDF['value'].notna()].copy()
                 if valid_hm.empty:
-                    return
+                    return _skip('mapped_non_rasterizable')
                 else:
                     valid_hm['value'] = valid_hm['value'].astype('uint8')
                     shapes = ((geom, value) for geom, value in zip(valid_hm.geometry, valid_hm['value']))
@@ -754,25 +776,26 @@ def doMovWin_imgshp(i: int,
 
             plot_label_resized = clipped_raster_resized.copy()
             if export_empty_label and doPlot:
-                valid_hm_plot = clipped_hmDF[clipped_hmDF['value'].notna()].copy()
-                if not valid_hm_plot.empty:
-                    valid_hm_plot['value'] = valid_hm_plot['value'].astype('uint8')
-                    plot_shapes = ((geom, value) for geom, value in zip(valid_hm_plot.geometry, valid_hm_plot['value']))
-                    rasterized_plot = rio.features.rasterize(
-                        plot_shapes,
-                        out_shape=(raster_height, raster_width),
-                        transform=clipped_transform,
-                        fill=0,
-                        dtype='uint8'
-                    )
-                    plot_label_resized = resize(
-                        rasterized_plot,
-                        target_size,
-                        order=0,
-                        preserve_range=True,
-                        clip=True
-                    ).astype('uint8')
-                    plot_label_resized = (plot_label_resized * clipped_raster_mask).astype('uint8')
+                if 'value' in clipped_hmDF.columns:
+                    valid_hm_plot = clipped_hmDF[clipped_hmDF['value'].notna()].copy()
+                    if not valid_hm_plot.empty:
+                        valid_hm_plot['value'] = valid_hm_plot['value'].astype('uint8')
+                        plot_shapes = ((geom, value) for geom, value in zip(valid_hm_plot.geometry, valid_hm_plot['value']))
+                        rasterized_plot = rio.features.rasterize(
+                            plot_shapes,
+                            out_shape=(raster_height, raster_width),
+                            transform=clipped_transform,
+                            fill=0,
+                            dtype='uint8'
+                        )
+                        plot_label_resized = resize(
+                            rasterized_plot,
+                            target_size,
+                            order=0,
+                            preserve_range=True,
+                            clip=True
+                        ).astype('uint8')
+                        plot_label_resized = (plot_label_resized * clipped_raster_mask).astype('uint8')
 
             # Do not auto-fill unlabeled background with any class (e.g., mask/shadow).
             # This preserves explicit class labels and keeps unlabeled pixels as 0.
@@ -795,6 +818,8 @@ def doMovWin_imgshp(i: int,
             # Store everythining in a dictionary
             sampleInfo = {'mosaic': mosaic,
                             'habitat': shp,
+                            'status': 'exported',
+                            'tile_export_kind': 'zero_unclassified' if export_empty_label else 'classified',
                             'window_size': windowSize[0],
                             'x_min': window_bounds[0],
                             'y_min': window_bounds[1],
@@ -868,11 +893,13 @@ def doMovWin_imgshp(i: int,
                     print(f"[ERROR] Exception in plotting: {str(e)}")
 
             return sampleInfo
+        else:
+            return _skip('low_sonar_coverage')
     except Exception as e:
         print(f"[ERROR] Exception in doMovWin_imgshp: {str(e)}")
         import traceback
         traceback.print_exc()
-        pass
+        return _skip('exception')
 
 ##========================================================       
 def label_to_colors(

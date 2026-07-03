@@ -7,6 +7,7 @@ Copyright (c) 2025- Cameron S. Bodine
 # Imports
 
 import os, sys
+from collections import Counter
 from joblib import Parallel, delayed
 from tqdm import tqdm
 import rasterio as rio
@@ -112,6 +113,24 @@ def doImgLbl2tile(inFileSonar: str,
     outPltDir = os.path.join(outDir, 'plots')
 
     if mask_reproj.lower().endswith('.shp'):
-        _ = Parallel(n_jobs=threadCnt)(delayed(doMovWin_imgshp)(i=i, movWin=movWin.iloc[i], mosaic=mosaic_reproj, shp=mask_reproj, target_size=target_size, outSonDir=outSonDir, outMaskDir=outMaskDir, outPltDir=outPltDir, outName=outName, classFieldName=classFieldName, minArea_percent=minArea_percent, windowSize=windowSize, classCrossWalk=classCrossWalk, doPlot=doPlot, allowNoMapTiles=allowNoMapTiles) for i in tqdm(range(total_win)))
+        results = Parallel(n_jobs=threadCnt)(delayed(doMovWin_imgshp)(i=i, movWin=movWin.iloc[i], mosaic=mosaic_reproj, shp=mask_reproj, target_size=target_size, outSonDir=outSonDir, outMaskDir=outMaskDir, outPltDir=outPltDir, outName=outName, classFieldName=classFieldName, minArea_percent=minArea_percent, windowSize=windowSize, classCrossWalk=classCrossWalk, doPlot=doPlot, allowNoMapTiles=allowNoMapTiles) for i in tqdm(range(total_win)))
+
+        status_counter = Counter()
+        for result in results:
+            if not isinstance(result, dict):
+                status_counter['skipped_unknown'] += 1
+                continue
+
+            if result.get('status') == 'skipped':
+                status_counter[f"skipped_{result.get('reason', 'unknown')}"] += 1
+                continue
+
+            tile_kind = result.get('tile_export_kind', 'classified')
+            status_counter[f"exported_{tile_kind}"] += 1
+
+        print(
+            "[Tile summary] "
+            + ", ".join(f"{k}={v}" for k, v in sorted(status_counter.items()))
+        )
 
     return
