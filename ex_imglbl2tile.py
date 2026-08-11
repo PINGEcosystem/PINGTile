@@ -18,7 +18,7 @@ sys.path.append(os.path.dirname(__file__))
 
 # For Package
 from pingtile.imglbl2tile import doImgLbl2tile
-from pingtile.utils import mask_to_coco_json
+from pingtile.utils import build_case_insensitive_basename_lookup, mask_to_coco_json
 
 import rasterio as rio
 import json
@@ -27,13 +27,20 @@ import json
 # Parameters
 
 # Map can be specified as a directory containing all map files, or a single map file to use for all mosaics.
-map = r"Z:\scratch\ping_tile_test\shp\Model_Training_Substrate_Polygons_Export.shp"
+map = r"Z:\UDEL\Projects\SAV_DESG_CBIG\data\20260811_LukeMerrit_Maps\Polygons SHP Files\Delaware"
 
 # Sonar Directory can be specified as a directory containing all sonar files, or a single sonar file to process (if map is a single file).
-sonarDir = r"Z:\scratch\ping_tile_test\mosaic"
+sonarDir = r"Z:\UDEL\Projects\SAV_DESG_CBIG\data\20260811_LukeMerrit_Maps\Training Mosaics\Delaware"
 
-outDirTop = r'Z:\scratch\ping_tile_test\img_lbl'
-outName = 'shadow_test'
+outDirTop = r'Z:\UDEL\Projects\SAV_DESG_CBIG\data\20260811_LukeMerrit_Maps\pingtiles\Delaware'
+outName = 'sav_tiles'
+
+classCrossWalk = {
+    'background': 0,
+    'p': 1,             # SAV present
+    'n': 2,             # SAV absent
+    'u': 3,             # SAV unknown
+}
 
 # classCrossWalk = {
 #     'background': 0,
@@ -46,13 +53,13 @@ outName = 'shadow_test'
 #     'mask': 255
 # }
 
-classCrossWalk = {
-    '0':0,
-    'U':1,
-    'G':2,
-    'B_C':3,
-    'B':4
-}
+# classCrossWalk = {
+#     '0':0,
+#     'U':1,
+#     'G':2,
+#     'B_C':3,
+#     'B':4
+# }
 
 windowSize_m = [
                 # (12,12),
@@ -60,12 +67,12 @@ windowSize_m = [
                 # (24,24),
                 ]
 
-windowStride = 12
-classFieldName = 'Substrate_'
+windowStride = 9
+classFieldName = 'SAV'
 minArea_percent = 0.5
 target_size = (512, 512) #(1024, 1024)
 threadCnt = 0.75
-epsg_out = 32615
+epsg_out = 32618
 doPlot = True
 lbl2COCO = True
 allowNoMapTiles = True  # Set True to also export sonar-covered tiles that have no map overlap.
@@ -111,8 +118,8 @@ if len(sonarFiles) == 0:
 
 # Resolve map input: either one map file for all mosaics, or directory of per-mosaic maps.
 map_is_dir = os.path.isdir(map)
-single_map_file = None
-map_lookup = {}
+single_map_file: str | None = None
+map_lookup: dict[str, str] = {}
 
 if map_is_dir:
     print(f"Map input mode: directory pairing from {map}")
@@ -126,20 +133,12 @@ if map_is_dir:
     if len(map_files) == 0:
         raise FileNotFoundError(f"No map files (*.shp, *.tif, *.tiff) found under: {map}")
 
-    duplicate_map_names = set()
-    for map_file in map_files:
-        base = os.path.splitext(os.path.basename(map_file))[0]
-        # Keep the first matching map per basename to avoid ambiguous pairing.
-        if base not in map_lookup:
-            map_lookup[base] = map_file
-        else:
-            duplicate_map_names.add(base)
+    map_lookup = build_case_insensitive_basename_lookup(map_files)
 
     print(f"Found {len(map_lookup)} map files for pairing.")
-    if duplicate_map_names:
+    if len(map_lookup) != len(map_files):
         print(
-            "WARNING: Found duplicate map basenames and kept first match for: "
-            + ", ".join(sorted(duplicate_map_names))
+            "WARNING: Found duplicate map basenames and kept first match for some files."
         )
 else:
     if not os.path.exists(map):
@@ -172,19 +171,26 @@ for windowSize in windowSize_m:
 
     for sonarFile in sonarFiles:
 
-        sonar_base = os.path.splitext(os.path.basename(sonarFile))[0]
+        sonar_path = str(sonarFile)
+        sonar_base = os.path.splitext(os.path.basename(sonar_path))[0]
+        map_file: str | None
 
         if map_is_dir:
-            map_file = map_lookup.get(sonar_base)
+            map_file = map_lookup.get(sonar_base.lower())
             if map_file is None:
-                print(f"Skipping {os.path.basename(sonarFile)}: no map found with matching name '{sonar_base}'.")
+                print(f"Skipping {os.path.basename(sonar_path)}: no map found with matching name '{sonar_base}'.")
                 skipped_cnt += 1
                 continue
         else:
             map_file = single_map_file
 
+        if map_file is None:
+            print(f"Skipping {os.path.basename(sonar_path)}: no valid map path resolved.")
+            skipped_cnt += 1
+            continue
+
         print(
-            f"\nProcessing sonar={os.path.basename(sonarFile)} "
+            f"\nProcessing sonar={os.path.basename(sonar_path)} "
             f"with map={os.path.basename(map_file)} "
             f"windowSize={windowSize} windowStride_m={windowStride_m}...\n"
         )
@@ -200,7 +206,7 @@ for windowSize in windowSize_m:
                       classFieldName=classFieldName,
                       minArea_percent=minArea_percent,
                       target_size=target_size,
-                      threadCnt=threadCnt,
+                      threadCnt=int(threadCnt),
                       doPlot=doPlot,
                       allowNoMapTiles=allowNoMapTiles
                       )

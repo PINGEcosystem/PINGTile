@@ -95,6 +95,23 @@ def _is_int_like(value) -> bool:
         return False
 
 
+def build_case_insensitive_basename_lookup(map_files: list[str]) -> dict:
+    """Build a basename lookup that matches names regardless of case."""
+
+    lookup = {}
+    duplicate_names = set()
+
+    for map_file in map_files:
+        base = os.path.splitext(os.path.basename(map_file))[0]
+        normalized_base = base.lower()
+        if normalized_base not in lookup:
+            lookup[normalized_base] = map_file
+        else:
+            duplicate_names.add(base)
+
+    return lookup
+
+
 def _get_class_name_map(config: dict) -> dict:
     """Build a class-id to class-name mapping from legacy or Hugging Face configs."""
 
