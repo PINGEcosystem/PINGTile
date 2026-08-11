@@ -28,12 +28,12 @@ import json
 # Parameters
 
 # Map can be specified as a directory containing all map files, or a single map file to use for all mosaics.
-map = r"Z:\UDEL\Projects\SAV_DESG_CBIG\data\20260811_LukeMerrit_Maps\Polygons SHP Files\Germany"
+map = r"Z:\UDEL\Projects\SAV_DESG_CBIG\data\20260811_LukeMerrit_Maps\Polygons SHP Files\AtwoodLake"
 
 # Sonar Directory can be specified as a directory containing all sonar files, or a single sonar file to process (if map is a single file).
-sonarDir = r"Z:\UDEL\Projects\SAV_DESG_CBIG\data\20260811_LukeMerrit_Maps\Training Mosaics\Germany"
+sonarDir = r"Z:\UDEL\Projects\SAV_DESG_CBIG\data\20260811_LukeMerrit_Maps\Training Mosaics\AtwoodLake"
 
-outDirTop = r'Z:\UDEL\Projects\SAV_DESG_CBIG\data\20260811_LukeMerrit_Maps\pingtiles\Germany'
+outDirTop = r'Z:\UDEL\Projects\SAV_DESG_CBIG\data\20260811_LukeMerrit_Maps\pingtiles\AtwoodLake'
 outName = 'sav_tiles'
 
 classCrossWalk = {
@@ -73,7 +73,7 @@ classFieldName = 'SAV'
 minArea_percent = 0.5
 target_size = (512, 512) #(1024, 1024)
 threadCnt = 0.75
-epsg_out = 32618
+epsg_out = 32122
 doPlot = True
 lbl2COCO = True
 allowNoMapTiles = False  # Set True to also export sonar-covered tiles that have no map overlap.

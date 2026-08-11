@@ -503,6 +503,7 @@ def getMaskFootprint(sonPath: str,
     # Get filname
     fileName = os.path.basename(sonPath)
     f_out = sonPath.replace('.tif', '_footprint.tif')
+    footprint_gdf = None
 
     # Get output path
     outDir = os.path.dirname(sonPath)
@@ -547,10 +548,11 @@ def getMaskFootprint(sonPath: str,
 
     if os.path.exists(f_out):
         os.remove(f_out)
+
+    if footprint_gdf is not None and not footprint_gdf.empty:
         return footprint_gdf.geometry.iloc[0]
-        
-    else:    
-        return None
+
+    return None
 
 
 #========================================================
