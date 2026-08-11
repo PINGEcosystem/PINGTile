@@ -6,6 +6,7 @@ Copyright (c) 2025 Cameron S. Bodine
 # Imports
 import os, sys
 import inspect
+import re
 from osgeo import gdal, ogr, osr
 import rasterio as rio
 from rasterio.mask import mask
@@ -101,33 +102,35 @@ def build_case_insensitive_basename_lookup(map_files: list[str]) -> dict:
     lookup = {}
     duplicate_names = set()
     suffixes = ('_reproj', '_mosaic', '_map', '_shp', '_tif', '_tiff', '_polygon', '_polygons')
+    # Strip PINGMapper output suffixes: _rect_wcr_mosaic_N, _wcr_mosaic_N, _mosaic_N, etc.
+    _pingmapper_suffix_re = re.compile(r'(_rect_wcr|_wcr)?_mosaic(_\d+)?$', re.IGNORECASE)
 
     def _normalize_name(name: str) -> str:
-        normalized = name.lower()
+        normalized = _pingmapper_suffix_re.sub('', name).lower()
         for suffix in suffixes:
             if normalized.endswith(suffix):
                 normalized = normalized[:-len(suffix)]
                 break
         return normalized
 
-    def _normalize_name_with_optional_numeric_suffix(name: str) -> str:
+    def _normalize_name_no_numeric(name: str) -> str:
         normalized = _normalize_name(name)
         if normalized and normalized[-1].isdigit():
-            normalized = normalized.rstrip('0123456789')
-            normalized = normalized.rstrip('_')
+            normalized = normalized.rstrip('0123456789').rstrip('_')
         return normalized
 
     for map_file in map_files:
         base = os.path.splitext(os.path.basename(map_file))[0]
-        normalized_base = _normalize_name(base)
-        normalized_base_with_numeric_suffix = _normalize_name_with_optional_numeric_suffix(base)
+        key_exact = _normalize_name(base)
+        key_no_num = _normalize_name_no_numeric(base)
 
-        if normalized_base not in lookup:
-            lookup[normalized_base] = map_file
-        if normalized_base_with_numeric_suffix not in lookup:
-            lookup[normalized_base_with_numeric_suffix] = map_file
+        # Prefer exact match; numeric-stripped key serves as fallback for mosaic->map mapping.
+        if key_exact not in lookup:
+            lookup[key_exact] = map_file
         else:
             duplicate_names.add(base)
+        if key_no_num not in lookup:
+            lookup[key_no_num] = map_file
 
     return lookup
 
