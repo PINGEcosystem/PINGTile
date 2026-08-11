@@ -102,8 +102,11 @@ def build_case_insensitive_basename_lookup(map_files: list[str]) -> dict:
     lookup = {}
     duplicate_names = set()
     suffixes = ('_reproj', '_mosaic', '_map', '_shp', '_tif', '_tiff', '_polygon', '_polygons')
-    # Strip PINGMapper output suffixes: _rect_wcr_mosaic_N, _wcr_mosaic_N, _mosaic_N, etc.
     _pingmapper_suffix_re = re.compile(r'(_rect_wcr|_wcr)?_mosaic(_\d+)?$', re.IGNORECASE)
+    # Matches a trailing _N index (e.g. transect_1) but not embedded tokens like rec00004.
+    _trailing_index_re = re.compile(r'_\d+$')
+    # Matches standalone 6-8 digit date tokens (e.g. _20260430_ or _2026430_).
+    _date_token_re = re.compile(r'_\d{6,8}(?=_|$)')
 
     def _normalize_name(name: str) -> str:
         normalized = _pingmapper_suffix_re.sub('', name).lower()
@@ -113,24 +116,21 @@ def build_case_insensitive_basename_lookup(map_files: list[str]) -> dict:
                 break
         return normalized
 
-    def _normalize_name_no_numeric(name: str) -> str:
-        normalized = _normalize_name(name)
-        if normalized and normalized[-1].isdigit():
-            normalized = normalized.rstrip('0123456789').rstrip('_')
-        return normalized
-
     for map_file in map_files:
         base = os.path.splitext(os.path.basename(map_file))[0]
         key_exact = _normalize_name(base)
-        key_no_num = _normalize_name_no_numeric(base)
+        key_no_index = _trailing_index_re.sub('', key_exact)
+        key_no_date = _date_token_re.sub('', key_exact)
 
-        # Prefer exact match; numeric-stripped key serves as fallback for mosaic->map mapping.
         if key_exact not in lookup:
             lookup[key_exact] = map_file
         else:
             duplicate_names.add(base)
-        if key_no_num not in lookup:
-            lookup[key_no_num] = map_file
+        # Fallback keys: only add when distinct from exact to avoid overwriting a better match.
+        if key_no_index not in lookup:
+            lookup[key_no_index] = map_file
+        if key_no_date not in lookup:
+            lookup[key_no_date] = map_file
 
     return lookup
 

@@ -7,6 +7,7 @@ Copyright (c) 2025 Cameron S. Bodine
 # Imports
 
 import os, sys
+import re
 from joblib import Parallel, delayed, cpu_count
 from PIL import Image
 
@@ -27,12 +28,12 @@ import json
 # Parameters
 
 # Map can be specified as a directory containing all map files, or a single map file to use for all mosaics.
-map = r"Z:\UDEL\Projects\SAV_DESG_CBIG\data\20260811_LukeMerrit_Maps\Polygons SHP Files\Delaware"
+map = r"Z:\UDEL\Projects\SAV_DESG_CBIG\data\20260811_LukeMerrit_Maps\Polygons SHP Files\Germany"
 
 # Sonar Directory can be specified as a directory containing all sonar files, or a single sonar file to process (if map is a single file).
-sonarDir = r"Z:\UDEL\Projects\SAV_DESG_CBIG\data\20260811_LukeMerrit_Maps\Training Mosaics\Delaware"
+sonarDir = r"Z:\UDEL\Projects\SAV_DESG_CBIG\data\20260811_LukeMerrit_Maps\Training Mosaics\Germany"
 
-outDirTop = r'Z:\UDEL\Projects\SAV_DESG_CBIG\data\20260811_LukeMerrit_Maps\pingtiles\Delaware'
+outDirTop = r'Z:\UDEL\Projects\SAV_DESG_CBIG\data\20260811_LukeMerrit_Maps\pingtiles\Germany'
 outName = 'sav_tiles'
 
 classCrossWalk = {
@@ -63,11 +64,11 @@ classCrossWalk = {
 
 windowSize_m = [
                 # (12,12),
-                (18,18),
-                # (24,24),
+                # (18,18),
+                (24,24),
                 ]
 
-windowStride = 9
+windowStride = 12
 classFieldName = 'SAV'
 minArea_percent = 0.5
 target_size = (512, 512) #(1024, 1024)
@@ -75,7 +76,7 @@ threadCnt = 0.75
 epsg_out = 32618
 doPlot = True
 lbl2COCO = True
-allowNoMapTiles = True  # Set True to also export sonar-covered tiles that have no map overlap.
+allowNoMapTiles = False  # Set True to also export sonar-covered tiles that have no map overlap.
 
 if not os.path.exists(outDirTop):
     os.makedirs(outDirTop)
@@ -135,7 +136,7 @@ if map_is_dir:
 
     map_lookup = build_case_insensitive_basename_lookup(map_files)
 
-    print(f"Found {len(map_lookup)} map files for pairing.")
+    print(f"Found {len(map_lookup)} map lookup keys for pairing: {sorted(map_lookup.keys())}")
     if len(map_lookup) != len(map_files):
         print(
             "WARNING: Found duplicate map basenames and kept first match for some files."
@@ -146,6 +147,7 @@ else:
     print(f"Map input mode: single map file applied to all mosaics: {map}")
     single_map_file = map
 
+_pingmapper_suffix_re = re.compile(r'(_rect_wcr|_wcr)?_mosaic(_\d+)?$', re.IGNORECASE)
 
 for windowSize in windowSize_m:
 
@@ -176,11 +178,21 @@ for windowSize in windowSize_m:
         map_file: str | None
 
         if map_is_dir:
-            map_file = map_lookup.get(sonar_base.lower())
-            if map_file is None:
-                print(f"Skipping {os.path.basename(sonar_path)}: no map found with matching name '{sonar_base}'.")
-                skipped_cnt += 1
-                continue
+            normalized_sonar = _pingmapper_suffix_re.sub('', sonar_base).lower()
+            candidate_keys = [normalized_sonar]
+            for suffix in ('_reproj', '_map', '_shp', '_tif', '_tiff', '_polygon', '_polygons'):
+                if normalized_sonar.endswith(suffix):
+                    candidate_keys.append(normalized_sonar[:-len(suffix)])
+            # Trailing _N index fallback (e.g. transect_1 -> transect).
+            candidate_keys.append(re.sub(r'_\d+$', '', normalized_sonar))
+            # Date-token fallback for YYYYMMDD/YYYYDDD mismatches between file sets.
+            candidate_keys.append(re.sub(r'_\d{6,8}(?=_|$)', '', normalized_sonar))
+
+            map_file = None
+            for key in dict.fromkeys(candidate_keys):  # preserve order, skip dupes
+                if key in map_lookup:
+                    map_file = map_lookup[key]
+                    break
         else:
             map_file = single_map_file
 
