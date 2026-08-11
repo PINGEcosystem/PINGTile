@@ -96,16 +96,36 @@ def _is_int_like(value) -> bool:
 
 
 def build_case_insensitive_basename_lookup(map_files: list[str]) -> dict:
-    """Build a basename lookup that matches names regardless of case."""
+    """Build a basename lookup that matches names regardless of case and common suffixes."""
 
     lookup = {}
     duplicate_names = set()
+    suffixes = ('_reproj', '_mosaic', '_map', '_shp', '_tif', '_tiff', '_polygon', '_polygons')
+
+    def _normalize_name(name: str) -> str:
+        normalized = name.lower()
+        for suffix in suffixes:
+            if normalized.endswith(suffix):
+                normalized = normalized[:-len(suffix)]
+                break
+        return normalized
+
+    def _normalize_name_with_optional_numeric_suffix(name: str) -> str:
+        normalized = _normalize_name(name)
+        if normalized and normalized[-1].isdigit():
+            normalized = normalized.rstrip('0123456789')
+            normalized = normalized.rstrip('_')
+        return normalized
 
     for map_file in map_files:
         base = os.path.splitext(os.path.basename(map_file))[0]
-        normalized_base = base.lower()
+        normalized_base = _normalize_name(base)
+        normalized_base_with_numeric_suffix = _normalize_name_with_optional_numeric_suffix(base)
+
         if normalized_base not in lookup:
             lookup[normalized_base] = map_file
+        if normalized_base_with_numeric_suffix not in lookup:
+            lookup[normalized_base_with_numeric_suffix] = map_file
         else:
             duplicate_names.add(base)
 
