@@ -5,13 +5,20 @@ Copyright (c) 2025 Cameron S. Bodine
 #########
 # Imports
 import os, sys
+import glob
 import inspect
 import re
+import faulthandler
+import tempfile
+import time
+import psutil
 from osgeo import gdal, ogr, osr
 import rasterio as rio
 from rasterio.mask import mask
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from rasterio.transform import from_origin
+import rasterio.features as rio_features
+from affine import Affine as rio_Affine
 import geopandas as gpd
 import pandas as pd
 import shapely
@@ -33,6 +40,102 @@ from shapely.wkt import loads
 from skimage.io import imsave, imread
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
+
+_SHAPEFILE_CACHE_PATH = None
+_SHAPEFILE_CACHE = None
+_RASTER_CACHE_PATH = None
+_RASTER_CACHE = None
+_CLASS_METADATA_CACHE = {}
+_FOOTPRINT_CACHE = {}
+_MOVING_WINDOW_CACHE = {}
+_FAULT_LOG_FILE = None
+_FAULT_LOG_DIR = os.path.join(tempfile.gettempdir(), 'pingtile_crash_logs')
+
+
+def _enable_worker_fault_logging():
+    """Enable faulthandler once per process so segfaults leave a per-PID traceback file."""
+    global _FAULT_LOG_FILE
+
+    if _FAULT_LOG_FILE is not None:
+        return
+
+    os.makedirs(_FAULT_LOG_DIR, exist_ok=True)
+    log_path = os.path.join(_FAULT_LOG_DIR, f'fault_{os.getpid()}.log')
+    _FAULT_LOG_FILE = open(log_path, 'w')
+    faulthandler.enable(file=_FAULT_LOG_FILE, all_threads=True)
+
+    # cv2's internal thread pool competes with joblib's process-level parallelism.
+    try:
+        cv2.setNumThreads(0)
+    except Exception:
+        pass
+
+
+def _log_worker_memory(i: int, tag: str = ''):
+    """Print this worker's RSS to stderr so growth can be correlated with a window index before a crash."""
+    try:
+        rss_mb = psutil.Process(os.getpid()).memory_info().rss / (1024 ** 2)
+        avail_mb = psutil.virtual_memory().available / (1024 ** 2)
+        print(
+            f'[mem] pid={os.getpid()} win={i} {tag} rss_mb={rss_mb:.1f} sys_avail_mb={avail_mb:.1f}',
+            file=sys.stderr,
+            flush=True,
+        )
+    except Exception:
+        pass
+
+
+def _get_cached_shapefile(shp: str):
+    """Load one shapefile per worker instead of reopening it for every window."""
+    global _SHAPEFILE_CACHE_PATH, _SHAPEFILE_CACHE
+
+    if _SHAPEFILE_CACHE_PATH != shp:
+        _SHAPEFILE_CACHE = gpd.read_file(shp)
+        _SHAPEFILE_CACHE_PATH = shp
+
+    return _SHAPEFILE_CACHE
+
+
+def _get_cached_raster(mosaic: str):
+    """Keep one read-only raster handle per worker and mosaic path."""
+    global _RASTER_CACHE_PATH, _RASTER_CACHE
+
+    if _RASTER_CACHE_PATH != mosaic:
+        if _RASTER_CACHE is not None:
+            _RASTER_CACHE.close()
+        _RASTER_CACHE = rio.open(mosaic)
+        _RASTER_CACHE_PATH = mosaic
+
+    return _RASTER_CACHE
+
+
+def _get_class_metadata(class_crosswalk: dict):
+    key = tuple(sorted((str(name), str(value)) for name, value in class_crosswalk.items()))
+    if key not in _CLASS_METADATA_CACHE:
+        mask_like_values = set()
+        valid_class_values = set()
+        value_to_class_name = {}
+        value_to_name = {}
+        for name, value in class_crosswalk.items():
+            if not _is_int_like(value):
+                continue
+            value = int(value)
+            name_text = str(name)
+            name_lower = name_text.strip().lower()
+            value_to_class_name[value] = name_text
+            value_to_name[value] = name_lower
+            if name_lower in ('mask', 'shadow'):
+                mask_like_values.add(value)
+            elif value > 0:
+                valid_class_values.add(value)
+        _CLASS_METADATA_CACHE[key] = (
+            mask_like_values,
+            valid_class_values,
+            value_to_class_name,
+            value_to_name,
+        )
+    return _CLASS_METADATA_CACHE[key]
+
 
 #========================================================
 def _configure_gdal_runtime():
@@ -97,19 +200,24 @@ def _is_int_like(value) -> bool:
 
 
 def build_case_insensitive_basename_lookup(map_files: list[str]) -> dict:
-    """Build a basename lookup that matches names regardless of case and common suffixes."""
+    """Build a basename lookup that matches names regardless of case and common suffixes.
+
+    Mosaic indexes are preserved intentionally because names like "mosaic_0" and
+    "mosaic_12" are distinct data products and must not collapse to the same key.
+    """
 
     lookup = {}
     duplicate_names = set()
-    suffixes = ('_reproj', '_mosaic', '_map', '_shp', '_tif', '_tiff', '_polygon', '_polygons')
-    _pingmapper_suffix_re = re.compile(r'(_rect_wcr|_wcr)?_mosaic(_\d+)?$', re.IGNORECASE)
+    suffixes = ('_reproj', '_map', '_shp', '_tif', '_tiff', '_polygon', '_polygons')
+    _pingmapper_prefix_re = re.compile(r'(_rect_wcr|_wcr)(?=_mosaic(?:_\d+)?$)', re.IGNORECASE)
     # Matches a trailing _N index (e.g. transect_1) but not embedded tokens like rec00004.
     _trailing_index_re = re.compile(r'_\d+$')
     # Matches standalone 6-8 digit date tokens (e.g. _20260430_ or _2026430_).
     _date_token_re = re.compile(r'_\d{6,8}(?=_|$)')
 
     def _normalize_name(name: str) -> str:
-        normalized = _pingmapper_suffix_re.sub('', name).lower()
+        normalized = name.strip().lower()
+        normalized = _pingmapper_prefix_re.sub('', normalized)
         for suffix in suffixes:
             if normalized.endswith(suffix):
                 normalized = normalized[:-len(suffix)]
@@ -119,20 +227,45 @@ def build_case_insensitive_basename_lookup(map_files: list[str]) -> dict:
     for map_file in map_files:
         base = os.path.splitext(os.path.basename(map_file))[0]
         key_exact = _normalize_name(base)
-        key_no_index = _trailing_index_re.sub('', key_exact)
-        key_no_date = _date_token_re.sub('', key_exact)
 
         if key_exact not in lookup:
             lookup[key_exact] = map_file
         else:
             duplicate_names.add(base)
-        # Fallback keys: only add when distinct from exact to avoid overwriting a better match.
-        if key_no_index not in lookup:
-            lookup[key_no_index] = map_file
-        if key_no_date not in lookup:
-            lookup[key_no_date] = map_file
+
+        # Fallback keys are only useful when a basename is not an indexed mosaic.
+        if '_mosaic_' not in key_exact:
+            key_no_index = _trailing_index_re.sub('', key_exact)
+            key_no_date = _date_token_re.sub('', key_exact)
+            if key_no_index not in lookup:
+                lookup[key_no_index] = map_file
+            if key_no_date not in lookup and key_no_date != key_exact:
+                lookup[key_no_date] = map_file
 
     return lookup
+
+
+def _safe_intersection(gdf: gpd.GeoDataFrame, window_geom) -> gpd.GeoDataFrame:
+    """Clip each feature individually and drop any malformed geometry that triggers GEOS topology errors."""
+
+    safe_rows = []
+    for idx, geom in gdf.geometry.items():
+        try:
+            clipped = geom.intersection(window_geom)
+        except Exception:
+            continue
+
+        if clipped is None or clipped.is_empty:
+            continue
+
+        safe_rows.append((idx, clipped))
+
+    if not safe_rows:
+        return gdf.iloc[0:0].copy()
+
+    result = gdf.loc[[idx for idx, _ in safe_rows]].copy()
+    result['geometry'] = [geom for _, geom in safe_rows]
+    return result
 
 
 def _get_class_name_map(config: dict) -> dict:
@@ -304,7 +437,7 @@ def reproject_raster_keep_bands(
         dst_crs: str | int,
         cell_size: float | None = None,
         max_pixels: int = 250_000_000,
-        overwrite: bool = False,
+        overwrite: bool = True,
         resampling: Resampling = Resampling.bilinear):
     """
     Reproject preserving all bands and original dtype.
@@ -317,8 +450,8 @@ def reproject_raster_keep_bands(
 
     base = os.path.splitext(os.path.basename(src_path))[0]
     out_path = os.path.join(dst_dir, f"{base}_reproj.tif")
-    if os.path.exists(out_path) and not overwrite:
-        return out_path, False
+    if os.path.exists(out_path):
+        os.remove(out_path)
     os.makedirs(dst_dir, exist_ok=True)
 
     with rio.open(src_path) as src:
@@ -354,23 +487,24 @@ def reproject_raster_keep_bands(
             "tiled": True
         })
 
-    with rio.open(out_path, "w", **profile) as dst:
-        for b in range(1, src.count + 1):
-            dest_band = np.zeros((height, width), dtype=profile["dtype"])
-            reproject(
-                source=rio.band(src, b),
-                destination=dest_band,
-                src_transform=src.transform,
-                src_crs=src_crs,
-                dst_transform=transform,
-                dst_crs=dst_crs_obj,
-                resampling=resampling,
-                dst_nodata=src.nodata
-            )
-            dst.write(dest_band, b)
-        
-        if src.nodata is not None:
-            dst.nodata = src.nodata
+    with rio.open(src_path) as src:
+        with rio.open(out_path, "w", **profile) as dst:
+            for b in range(1, src.count + 1):
+                dest_band = np.zeros((height, width), dtype=profile["dtype"])
+                reproject(
+                    source=rio.band(src, b),
+                    destination=dest_band,
+                    src_transform=src.transform,
+                    src_crs=src_crs,
+                    dst_transform=transform,
+                    dst_crs=dst_crs_obj,
+                    resampling=resampling,
+                    dst_nodata=src.nodata
+                )
+                dst.write(dest_band, b)
+
+            if src.nodata is not None:
+                dst.nodata = src.nodata
 
     return out_path, True
 
@@ -387,11 +521,10 @@ def reproject_shp(src_path: str,
 
     out_file = src_path.replace('.shp', '_reproj.shp')
 
-    if os.path.exists(out_file):
-        try:
-            os.remove(out_file)
-        except:
-            pass
+    # Remove the previous shapefile and every sidecar so the output is rebuilt.
+    out_stem = os.path.splitext(out_file)[0]
+    for existing_file in glob.glob(f'{out_stem}.*'):
+        os.remove(existing_file)
 
     gdf = gpd.read_file(src_path)
 
@@ -410,6 +543,11 @@ def reproject_shp(src_path: str,
 def getMovingWindow_rast(sonRast: str,
                          windowSize: tuple,
                          windowStride_m: float):
+
+    cache_key = (sonRast, tuple(windowSize), windowStride_m)
+    cached = _MOVING_WINDOW_CACHE.get(cache_key)
+    if cached is not None:
+        return cached.copy()
 
     # Open the raster
     with rio.open(sonRast) as sonRast:
@@ -451,6 +589,8 @@ def getMovingWindow_rast(sonRast: str,
 
     # Create a GeoDataFrame
     gdf = gpd.GeoDataFrame(geometry=geometries, crs=sonRast.crs)
+
+    _MOVING_WINDOW_CACHE[cache_key] = gdf.copy()
 
     return gdf
 
@@ -494,6 +634,10 @@ def getMovingWindow(df: pd.DataFrame,
 def getMaskFootprint(sonPath: str,
                      pix_res: float=10.0,
                      buffer_m: float=100.0):
+
+    cache_key = (sonPath, pix_res, buffer_m)
+    if cache_key in _FOOTPRINT_CACHE:
+        return _FOOTPRINT_CACHE[cache_key]
 
     # # Open the mask file
     # with rio.open(maskPath) as src:
@@ -550,8 +694,10 @@ def getMaskFootprint(sonPath: str,
         os.remove(f_out)
 
     if footprint_gdf is not None and not footprint_gdf.empty:
-        return footprint_gdf.geometry.iloc[0]
+        _FOOTPRINT_CACHE[cache_key] = footprint_gdf.geometry.iloc[0]
+        return _FOOTPRINT_CACHE[cache_key]
 
+    _FOOTPRINT_CACHE[cache_key] = None
     return None
 
 
@@ -570,25 +716,29 @@ def doMovWin_imgshp(i: int,
                  windowSize: tuple,
                  classCrossWalk: dict={},
                  doPlot: bool=False,
-                 allowNoMapTiles: bool=False
+                 allowNoMapTiles: bool=False,
+                 grayscale: bool=False
                  ):
 
     def _skip(reason: str):
         return {'status': 'skipped', 'reason': reason}
 
+    _enable_worker_fault_logging()
+
     minArea = minArea_percent * windowSize[0]*windowSize[1]
+    mask_like_values, valid_class_values, value_to_class_name, value_to_name = _get_class_metadata(classCrossWalk)
     
     mosaicName = os.path.basename(mosaic)
     mosaicName = mosaicName.split('_reproj.tif')[0]
 
     # Open the raster
-    sonRast = rio.open(mosaic)
+    sonRast = _get_cached_raster(mosaic)
 
     # Iterate each window
     # for i, movWin in movWin.iterrows():
     # print(f"{i} of {total_win}")
     # Get the geometry of the window
-    window_geom = movWin.geometry
+    window_geom = movWin.geometry if hasattr(movWin, 'geometry') else movWin
 
     # Get the bounds
     window_bounds = window_geom.bounds
@@ -601,10 +751,17 @@ def doMovWin_imgshp(i: int,
 
     win_coords = win_coords[:-1]
 
-    hmDF = gpd.read_file(shp)
+    try:
+        hmDF = _get_cached_shapefile(shp)
 
-    # Clip the habitat map using the window geometry
-    clipped_hmDF = gpd.overlay(hmDF, gpd.GeoDataFrame(geometry=[window_geom], crs=hmDF.crs), how='intersection')
+        # Clip candidate habitat features directly; overlay creates a large
+        # temporary GeoDataFrame for every window and retains allocator memory.
+        candidate_idx = hmDF.sindex.query(window_geom, predicate='intersects')
+        clipped_hmDF = hmDF.iloc[candidate_idx].copy()
+        if not clipped_hmDF.empty:
+            clipped_hmDF = _safe_intersection(clipped_hmDF, window_geom)
+    except Exception:
+        raise
 
 
     # Calculate the area of the clipped habitat map
@@ -631,14 +788,6 @@ def doMovWin_imgshp(i: int,
 
         # Only valid habitat classes count toward minArea_percent.
         # Ignore mask/shadow when deciding whether to export the tile.
-        mask_like_values = set()
-        for k, v in classCrossWalk.items():
-            if not _is_int_like(v):
-                continue
-            cls_name = str(k).strip().lower()
-            if cls_name in ('mask', 'shadow'):
-                mask_like_values.add(int(v))
-
         # Explicitly drop mask-only windows.
         if mask_like_values:
             mask_area = clipped_hmDF.loc[
@@ -647,18 +796,6 @@ def doMovWin_imgshp(i: int,
             ].sum()
             if np.isclose(mask_area, totalArea):
                 return _skip('mask_only')
-
-        valid_class_values = set()
-        for k, v in classCrossWalk.items():
-            if not _is_int_like(v):
-                continue
-            cls_value = int(v)
-            cls_name = str(k).strip().lower()
-            if cls_value <= 0:
-                continue
-            if cls_name in ('mask', 'shadow'):
-                continue
-            valid_class_values.add(cls_value)
 
         valid_area = 0.0
         if valid_class_values:
@@ -692,7 +829,12 @@ def doMovWin_imgshp(i: int,
         if not raster_bounds.intersects(window_geom):
             return _skip('outside_raster')  # window is completely outside the raster; skip it
 
-        clipped_raster_orig, clipped_transform = mask(sonRast, [window_geom], crop=True, filled=False)
+        raster_window = rio.windows.from_bounds(
+            *window_geom.bounds,
+            transform=sonRast.transform,
+        )
+        clipped_raster_orig = sonRast.read(window=raster_window, masked=True)
+        clipped_transform = sonRast.window_transform(raster_window)
 
         # Handle band count: limit to 3 if >= 3, keep as 1 if 1
         num_bands = clipped_raster_orig.shape[0]
@@ -701,15 +843,15 @@ def doMovWin_imgshp(i: int,
             # Single band: shape is (1, height, width) -> (height, width)
             band = clipped_raster_orig[0]
             valid_data_mask = ~np.ma.getmaskarray(band)
-            clipped_raster_2d = np.where(valid_data_mask, np.ma.getdata(band), 0)
+            clipped_raster_2d = np.where(valid_data_mask, np.ma.getdata(band), 0).astype('float32', copy=False)
         elif num_bands >= 3:
             # Three or more bands: take first 3 bands
             clipped_raster_2d = []
             for b in range(3):
                 band = clipped_raster_orig[b]
                 band_mask = ~np.ma.getmaskarray(band)
-                clipped_raster_2d.append(np.where(band_mask, np.ma.getdata(band), 0))
-            clipped_raster_2d = np.asarray(clipped_raster_2d)
+                clipped_raster_2d.append(np.where(band_mask, np.ma.getdata(band), 0).astype('float32', copy=False))
+            clipped_raster_2d = np.asarray(clipped_raster_2d, dtype='float32')
             valid_data_mask = ~np.ma.getmaskarray(clipped_raster_orig[0])
             num_bands = 3
         else:
@@ -718,9 +860,16 @@ def doMovWin_imgshp(i: int,
             for b in range(2):
                 band = clipped_raster_orig[b]
                 band_mask = ~np.ma.getmaskarray(band)
-                clipped_raster_2d.append(np.where(band_mask, np.ma.getdata(band), 0))
-            clipped_raster_2d = np.asarray(clipped_raster_2d)
+                clipped_raster_2d.append(np.where(band_mask, np.ma.getdata(band), 0).astype('float32', copy=False))
+            clipped_raster_2d = np.asarray(clipped_raster_2d, dtype='float32')
             valid_data_mask = ~np.ma.getmaskarray(clipped_raster_orig[0])
+
+        if grayscale and num_bands > 1:
+            # Collapse multi-band sonar to single-band grayscale via standard luminance weights.
+            weights = np.array([0.299, 0.587, 0.114][:num_bands], dtype='float32')
+            weights /= weights.sum()
+            clipped_raster_2d = np.tensordot(weights, clipped_raster_2d, axes=1).astype('float32', copy=False)
+            num_bands = 1
 
         # Resize valid-data footprint to target_size for coverage checks and label masking.
         valid_data_mask_resized = resize(
@@ -750,16 +899,15 @@ def doMovWin_imgshp(i: int,
         if valid_data_percentage >= minArea_percent:
 
 
-            # Recalculate the transform for the resized raster
-            new_transform = rio.transform.from_bounds(
-                window_bounds[0], window_bounds[1], window_bounds[2], window_bounds[3],
-                target_size[1], target_size[0]
-            )
-
             # Save the clipped raster and shapefile
             fileName = f"{outName}_{mosaicName}_{windowSize[0]}m_{win_coords}"
             out_raster_path = os.path.join(outSonDir, f"{fileName}.png")
             # out_shapefile_path = os.path.join(outMaskDir, f"{fileName}.shp")
+
+            new_transform = rio.transform.from_bounds(
+                window_bounds[0], window_bounds[1], window_bounds[2], window_bounds[3],
+                target_size[1], target_size[0]
+            )
 
             # Use valid-data footprint for masking labels so valid zero-intensity sonar is retained.
             clipped_raster_mask = valid_data_mask_resized
@@ -782,7 +930,8 @@ def doMovWin_imgshp(i: int,
                         dst.write(clipped_raster_resized[b], b + 1)
 
             # clipped_hmDF.to_file(out_shapefile_path)
-            
+
+            plot_image = clipped_raster_resized.copy() if doPlot else None
             del clipped_raster_resized
 
             # Get spatial dimensions from the band-limited raster
@@ -844,64 +993,58 @@ def doMovWin_imgshp(i: int,
 
             # Save the rasterized habitat map
             out_rasterized_path = os.path.join(outMaskDir, f"{fileName}.png")
-            with rio.open(
-                out_rasterized_path,
-                'w',
-                driver='GTiff',
-                height=clipped_raster_resized.shape[0],
-                width=clipped_raster_resized.shape[1],
-                count=1,
-                dtype=clipped_raster_resized.dtype,
-                crs=sonRast.crs,
-                transform=new_transform,
-            ) as dst:
-                dst.write(clipped_raster_resized, 1)
+            with rio.Env(GDAL_CACHEMAX=64):
+                with rio.open(
+                    out_rasterized_path,
+                    'w',
+                    driver='GTiff',
+                    height=clipped_raster_resized.shape[0],
+                    width=clipped_raster_resized.shape[1],
+                    count=1,
+                    dtype=clipped_raster_resized.dtype,
+                    crs=sonRast.crs,
+                    transform=new_transform,
+                ) as dst:
+                    dst.write(clipped_raster_resized, 1)
+
+            # Build reverse crosswalk mapping value -> class name for pixel count columns
+            # Count pixels of each class present in the exported (resized) label tile
+            pixel_values, pixel_counts = np.unique(clipped_raster_resized, return_counts=True)
+            class_pixel_counts = {
+                value_to_class_name.get(int(val), f'class_{int(val)}'): int(cnt)
+                for val, cnt in zip(pixel_values, pixel_counts)
+            }
 
             # Store everythining in a dictionary
-            sampleInfo = {'mosaic': mosaic,
+            sampleInfo = {'sonar_image_path': out_raster_path,
+                            'map_path': out_rasterized_path,
+                            'file_name': fileName,
+                            'mosaic': mosaic,
                             'habitat': shp,
                             'status': 'exported',
                             'tile_export_kind': 'zero_unclassified' if export_empty_label else 'classified',
                             'window_size': windowSize[0],
+                            'width': clipped_raster_resized.shape[1],
+                            'height': clipped_raster_resized.shape[0],
                             'x_min': window_bounds[0],
                             'y_min': window_bounds[1],
                             'x_max': window_bounds[2],
                             'y_max': window_bounds[3]}
-            
-            for k, v in class_areas.items():
-                sampleInfo[k] = v
+
+            for cls_name, cnt in class_pixel_counts.items():
+                sampleInfo[f'{cls_name}_pixel_count'] = cnt
 
             if doPlot:
                 try:
-                    img_f = out_raster_path
-                    lbl_f = out_rasterized_path
-
-                    img = imread(img_f)
-
-                    if img.ndim == 3 and img.shape[2] >= 3:
-                        base_rgb = img[:, :, :3].astype('float32')
+                    if plot_image.ndim == 3:
+                        base_rgb = np.transpose(plot_image, (1, 2, 0))[:, :, :3]
                     else:
-                        img2d = np.squeeze(img)
-                        if img2d.ndim != 2:
-                            img2d = img2d[:, :, 0]
-                        base_rgb = np.repeat(img2d[:, :, None], 3, axis=2).astype('float32')
+                        base_rgb = np.repeat(plot_image[:, :, None], 3, axis=2)
+                    base_rgb = base_rgb.astype('float32', copy=False)
 
-                    if export_empty_label:
-                        label_img = np.squeeze(plot_label_resized)
-                    else:
-                        lbl = imread(lbl_f)
-                        label_img = np.squeeze(lbl)
-                        if label_img.ndim != 2:
-                            label_img = label_img[:, :, 0]
+                    label_img = np.squeeze(plot_label_resized)
 
                     class_color_map = {0: '#000000'}
-                    value_to_name = {}
-                    value_to_display = {}
-                    for cls_name, cls_value in classCrossWalk.items():
-                        if _is_int_like(cls_value):
-                            cls_val = int(cls_value)
-                            value_to_name[cls_val] = str(cls_name).strip().lower()
-                            value_to_display[cls_val] = str(cls_name).strip()
 
                     dynamic_palette = [
                         '#0072B2', '#E69F00', '#009E73', '#CC79A7', '#D55E00', '#56B4E9',
@@ -918,21 +1061,21 @@ def doMovWin_imgshp(i: int,
                         rgb = tuple(fromhex(hex_color.replace('#', '')[j:j+2]) for j in (0, 2, 4))
                         color_label[label_img == class_value] = rgb
 
-                    alpha_mask = np.zeros(label_img.shape, dtype='float32')
-                    alpha_mask[label_img > 0] = 0.50
-                    alpha_mask = alpha_mask[:, :, None]
-                    composite = ((1.0 - alpha_mask) * base_rgb) + (alpha_mask * color_label.astype('float32'))
+                    composite = base_rgb.astype('uint8', copy=True)
+                    labeled = label_img > 0
+                    composite[labeled] = (
+                        composite[labeled].astype('float32') * 0.70
+                        + color_label[labeled].astype('float32') * 0.30
+                    ).astype('uint8')
 
-                    out_file = os.path.join(outPltDir, os.path.basename(img_f))
+                    out_file = os.path.join(outPltDir, os.path.basename(out_raster_path))
                     os.makedirs(outPltDir, exist_ok=True)
-                    fig, ax = plt.subplots(figsize=(8, 6))
-                    ax.imshow(composite.astype('uint8'))
-                    ax.axis('off')
-                    ax.set_title(os.path.basename(img_f))
-                    fig.savefig(out_file, dpi=200, bbox_inches='tight', pad_inches=0.1)
-                    plt.close(fig)
+                    Image.fromarray(composite.astype('uint8')).save(out_file, format='PNG')
+                    del base_rgb, label_img, color_label, composite
                 except Exception as e:
                     print(f"[ERROR] Exception in plotting: {str(e)}")
+                finally:
+                    plot_image = None
 
             return sampleInfo
         else:
@@ -1183,12 +1326,16 @@ def avg_npz_files_batch(df: pd.DataFrame,
     # Determine output array shape for this window (bands, height, width)
     sum_arr = np.zeros((win_bands, win_height, win_width), dtype=np.float64)
     count_arr = np.zeros((win_height, win_width), dtype=np.int32)
+    valid_sum_arr = np.zeros((win_height, win_width), dtype=np.float64)
 
     for _, row in overlaps.iterrows():
         base = os.path.splitext(os.path.basename(row['mosaic']))[0]
         npz_path = os.path.join(in_dir, f"{base}.npz")
         npz = np.load(npz_path)
         arr = npz['softmax']
+        # 'valid' flags real sonar data vs. nodata/zero-padding; older npz
+        # files without this key are treated as fully valid for backward compat.
+        valid_arr = npz['valid'].astype(np.float32) if 'valid' in npz.files else None
         # array geospatial bounds for this tile
         arr_minx, arr_miny, arr_maxx, arr_maxy = row[['x_min', 'y_min', 'x_max', 'y_max']]
         # Ensure arr has shape (bands, height, width)
@@ -1196,6 +1343,8 @@ def avg_npz_files_batch(df: pd.DataFrame,
             # single band -> (1, H, W)
             arr = arr[np.newaxis, ...]
         arr_bands, arr_h, arr_w = arr.shape
+        if valid_arr is None:
+            valid_arr = np.ones((arr_h, arr_w), dtype=np.float32)
         # compute pixel sizes for this array (float)
         arr_pixel_size_x = (arr_maxx - arr_minx) / float(arr_w)
         arr_pixel_size_y = (arr_maxy - arr_miny) / float(arr_h)
@@ -1273,9 +1422,12 @@ def avg_npz_files_batch(df: pd.DataFrame,
             # accumulate
             sum_arr[:, win_ys, win_xs] += arr[:, arr_ys, arr_xs]
             count_arr[win_ys, win_xs] += 1
+            valid_sum_arr[win_ys, win_xs] += valid_arr[arr_ys, arr_xs]
 
     # Avoid division by zero
     avg_arr = np.divide(sum_arr, count_arr, out=np.zeros_like(sum_arr), where=count_arr != 0)
+    # Fraction of contributing tiles that had real (non-nodata) sonar data at each pixel
+    valid_frac = np.divide(valid_sum_arr, count_arr, out=np.zeros_like(valid_sum_arr), where=count_arr != 0)
 
     # print('\n\n', avg_arr)
 
@@ -1289,7 +1441,7 @@ def avg_npz_files_batch(df: pd.DataFrame,
 
     # df['npz'] = out_npz
 
-    np.savez_compressed(out_npz, softmax=avg_arr)
+    np.savez_compressed(out_npz, softmax=avg_arr, valid=valid_frac.astype(np.float32))
 
 
     # Create output DataFrame row
@@ -1390,7 +1542,7 @@ def avg_npz_files(df: pd.DataFrame,
 
 
 #========================================================
-def label_array_to_raster(df, out_dir: str, outName: str, minPatchSize: float, windowSize_m: tuple, epsg: int):
+def label_array_to_raster(df, out_dir: str, outName: str, minPatchSize: float, windowSize_m: tuple, epsg: int, valid_threshold: float = 0.5):
     """
     Create a georeferenced single-band GeoTIFF from an npz softmax array.
 
@@ -1412,6 +1564,12 @@ def label_array_to_raster(df, out_dir: str, outName: str, minPatchSize: float, w
 
     label = np.argmax(softmax, axis=0).astype(np.uint8)  # Assuming softmax shape is (classes, height, width)
     # label += 1
+
+    # Mask out pixels with insufficient real (non-nodata) sonar coverage so
+    # predictions don't bleed beyond the mosaic's actual data footprint.
+    if 'valid' in npz.files:
+        valid_frac = npz['valid']
+        label[valid_frac < valid_threshold] = 0
 
     geom = df['geometry']
     # geometry may be a shapely geometry or a GeoSeries element
@@ -1730,7 +1888,8 @@ def map_npzs(df: pd.DataFrame,
              outName: str, 
              windowSize_m: tuple, 
              epsg: int,
-             threadCnt: int=4):
+             threadCnt: int=4,
+             valid_threshold: float=0.5):
 
     '''
     '''
@@ -1800,7 +1959,7 @@ def map_npzs(df: pd.DataFrame,
     #     label_array_to_raster(row, out_dir, outName, windowSize_m, epsg)
 
     total_maps = len(df)
-    _ = Parallel(n_jobs=threadCnt)(delayed(label_array_to_raster)(df.iloc[i], out_dir, outName, minPatchSize, windowSize_m, epsg) for i in tqdm(range(total_maps)))
+    _ = Parallel(n_jobs=threadCnt)(delayed(label_array_to_raster)(df.iloc[i], out_dir, outName, minPatchSize, windowSize_m, epsg, valid_threshold) for i in tqdm(range(total_maps)))
 
     return df
     
@@ -2275,42 +2434,65 @@ def create_mask():
 
 
 #========================================================
-def mask_to_coco_json(mask_path, image_info, categories_info, annotation_id_counter, simplify_tol=0.01):
+def mask_to_coco_json(mask_path, image_info, categories_info, annotation_id_counter, simplify_tol=1.0):
+    '''
+    Convert a labeled mask to COCO segmentation annotations.
+
+    All category polygons are extracted in a single polygonization pass and,
+    if simplified, are simplified together with a coverage-aware simplifier so
+    that boundaries shared between adjacent classes stay aligned. Simplifying
+    each class's contours independently (previous approach via per-contour
+    cv2.approxPolyDP) causes the shared edge to be simplified differently on
+    each side, producing misaligned/crossing boundaries between neighboring
+    class polygons.
+    '''
     mask = np.array(Image.open(mask_path))
     annotations = []
 
-    for category_id, category_name in categories_info.items():
-        # Create binary mask for the current category
-        binary_mask = (mask == category_id).astype(np.uint8) * 255
+    # Polygonize all foreground classes at once (pixel-space transform) so shared
+    # edges between adjacent polygons come from the same source geometry.
+    records = []
+    for geom, value in rio_features.shapes(mask.astype(np.int32), mask=(mask != 0), transform=rio_Affine.identity()):
+        value = int(value)
+        if value not in categories_info:
+            continue
+        records.append({'category_id': value, 'geometry': shape(geom)})
 
-        # Find contours
-        contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not records:
+        return annotations, annotation_id_counter
 
-        for contour in contours:
-            if cv2.contourArea(contour) > 0: # Filter out small or empty contours
-                # simplify contour with approxPolyDP (epsilon = fraction of perimeter)
-                peri = cv2.arcLength(contour, True)
-                epsilon = max(1.0, simplify_tol * peri)  # at least 1px epsilon to drop tiny wiggles
-                approx = cv2.approxPolyDP(contour, epsilon, True)
+    gdf = gpd.GeoDataFrame(records, geometry='geometry')
 
-                if approx.shape[0] < 3:
-                    continue  # need at least 3 points for a polygon
+    # Simplify all polygons together (coverage-aware) to preserve shared boundaries
+    if simplify_tol and simplify_tol > 0:
+        gdf['geometry'] = gdf.geometry.simplify_coverage(tolerance=simplify_tol)
 
-                segmentation = approx.reshape(-1, 2).flatten().tolist()
-                x, y, w, h = cv2.boundingRect(contour)
-                bbox = [x, y, w, h]
-                area = cv2.contourArea(contour)
+    gdf['geometry'] = gdf.geometry.buffer(0)
+    gdf = gdf.explode(index_parts=False).reset_index(drop=True)
 
-                annotations.append({
-                    "id": annotation_id_counter,
-                    "image_id": image_info["id"],
-                    "category_id": category_id,
-                    "segmentation": [segmentation], # COCO expects a list of polygons
-                    "area": area,
-                    "bbox": bbox,
-                    "iscrowd": 0
-                })
-                annotation_id_counter += 1
+    for _, row in gdf.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty or not hasattr(geom, 'exterior'):
+            continue
+
+        exterior = np.array(geom.exterior.coords)
+        if exterior.shape[0] < 3:
+            continue  # need at least 3 points for a polygon
+
+        segmentation = exterior.flatten().tolist()
+        minx, miny, maxx, maxy = geom.bounds
+        bbox = [minx, miny, maxx - minx, maxy - miny]
+
+        annotations.append({
+            "id": annotation_id_counter,
+            "image_id": image_info["id"],
+            "category_id": int(row['category_id']),
+            "segmentation": [segmentation], # COCO expects a list of polygons
+            "area": geom.area,
+            "bbox": bbox,
+            "iscrowd": 0
+        })
+        annotation_id_counter += 1
     return annotations, annotation_id_counter
 
 # ======================================================================

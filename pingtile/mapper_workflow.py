@@ -135,7 +135,8 @@ def default_predict_tiles(imagesDF: pd.DataFrame,
                           modelDir: str,
                           out_npz: str,
                           predBatchSize: int,
-                          threadCnt: int):
+                          threadCnt: int,
+                          image_norm_method: str = "standardize"):
     '''
     Select backend automatically and run tile prediction.
     '''
@@ -151,6 +152,7 @@ def default_predict_tiles(imagesDF: pd.DataFrame,
             out_dir=out_npz,
             batch_size=predBatchSize,
             threadCnt=threadCnt,
+            image_norm_method=image_norm_method,
         )
 
     if has_tf_model:
@@ -192,6 +194,8 @@ def run_mapper_workflow(
     minPatchSize: float = 3,
     smoothShp: bool = False,
     smoothTol_m: float = 0.5,
+    image_norm_method: str = "standardize",
+    valid_threshold: float = 0.5,
     print_usage=None,
     predict_tiles=None,
     debug: bool = False,
@@ -285,6 +289,7 @@ def run_mapper_workflow(
         out_npz=out_npz,
         predBatchSize=predBatchSize,
         threadCnt=threadCnt,
+        image_norm_method=image_norm_method,
     )
 
     outDF = os.path.join(outDir, f'{projName}_{windowSize_m[0]}_{windowSize_m[1]}_tileseg.csv')
@@ -353,6 +358,7 @@ def run_mapper_workflow(
         windowSize_m=windowSize_m,
         epsg=epsg,
         threadCnt=threadCnt,
+        valid_threshold=valid_threshold,
     )
 
     if deleteIntData:
