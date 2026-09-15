@@ -12,6 +12,7 @@ dependencies:
   - shapely
   - fiona
   - joblib
+  - psutil
   - tqdm
   - matplotlib
   - scikit-image

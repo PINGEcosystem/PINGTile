@@ -177,7 +177,8 @@ for windowSize in windowSize_m:
                       target_size=target_size,
                       threadCnt=threadCnt,
                       doPlot=doPlot,
-                      allowNoMapTiles=allowNoMapTiles
+                    allowNoMapTiles=allowNoMapTiles,
+                    grayscale=False,
                       )
 
 # Convert masks to COCO format
