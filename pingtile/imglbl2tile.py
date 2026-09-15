@@ -9,6 +9,7 @@ Copyright (c) 2025- Cameron S. Bodine
 import os, sys
 from collections import Counter
 from joblib import Parallel, delayed
+from joblib.externals.loky import get_reusable_executor
 from tqdm import tqdm
 import rasterio as rio
 
@@ -32,7 +33,8 @@ def doImgLbl2tile(inFileSonar: str,
                   target_size: tuple=(512,512),
                   threadCnt: int=4,
                   doPlot: bool=False,
-                  allowNoMapTiles: bool=False
+                  allowNoMapTiles: bool=False,
+                  grayscale: bool=False
                   ):
     
     '''
@@ -113,9 +115,43 @@ def doImgLbl2tile(inFileSonar: str,
     outPltDir = os.path.join(outDir, 'plots')
 
     if mask_reproj.lower().endswith('.shp'):
-        results = Parallel(n_jobs=threadCnt)(delayed(doMovWin_imgshp)(i=i, movWin=movWin.iloc[i], mosaic=mosaic_reproj, shp=mask_reproj, target_size=target_size, outSonDir=outSonDir, outMaskDir=outMaskDir, outPltDir=outPltDir, outName=outName, classFieldName=classFieldName, minArea_percent=minArea_percent, windowSize=windowSize, classCrossWalk=classCrossWalk, doPlot=doPlot, allowNoMapTiles=allowNoMapTiles) for i in tqdm(range(total_win)))
+        results = []
+        recycle_size = 250
+        with tqdm(total=total_win, desc='Processing windows') as progress:
+            for start in range(0, total_win, recycle_size):
+                stop = min(start + recycle_size, total_win)
+                with Parallel(
+                    n_jobs=threadCnt,
+                    batch_size='auto',
+                    pre_dispatch='2 * n_jobs',
+                ) as parallel:
+                    batch_results = parallel(
+                        delayed(doMovWin_imgshp)(
+                            i=i,
+                            movWin=movWin.geometry.iloc[i],
+                            mosaic=mosaic_reproj,
+                            shp=mask_reproj,
+                            target_size=target_size,
+                            outSonDir=outSonDir,
+                            outMaskDir=outMaskDir,
+                            outPltDir=outPltDir,
+                            outName=outName,
+                            classFieldName=classFieldName,
+                            minArea_percent=minArea_percent,
+                            windowSize=windowSize,
+                            classCrossWalk=classCrossWalk,
+                            doPlot=doPlot,
+                            allowNoMapTiles=allowNoMapTiles,
+                            grayscale=grayscale,
+                        )
+                        for i in range(start, stop)
+                    )
+                get_reusable_executor().shutdown(wait=True, kill_workers=True)
+                results.extend(batch_results)
+                progress.update(stop - start)
 
         status_counter = Counter()
+        exported = []
         for result in results:
             if not isinstance(result, dict):
                 status_counter['skipped_unknown'] += 1
@@ -127,10 +163,13 @@ def doImgLbl2tile(inFileSonar: str,
 
             tile_kind = result.get('tile_export_kind', 'classified')
             status_counter[f"exported_{tile_kind}"] += 1
+            exported.append(result)
 
         print(
             "[Tile summary] "
             + ", ".join(f"{k}={v}" for k, v in sorted(status_counter.items()))
         )
 
-    return
+        return exported
+
+    return []
