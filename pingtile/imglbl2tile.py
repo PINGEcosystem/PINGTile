@@ -9,7 +9,6 @@ Copyright (c) 2025- Cameron S. Bodine
 import os, sys
 from collections import Counter
 from joblib import Parallel, delayed
-from joblib.externals.loky import get_reusable_executor
 from tqdm import tqdm
 import rasterio as rio
 
@@ -116,15 +115,18 @@ def doImgLbl2tile(inFileSonar: str,
 
     if mask_reproj.lower().endswith('.shp'):
         results = []
-        recycle_size = 250
+        batch_size = 250
+        # Reuse a single worker pool for the whole file; tearing it down/recreating it
+        # per batch (as before) repeatedly hit a Windows loky worker-shutdown bug
+        # (PermissionError: [WinError 5] Access is denied).
         with tqdm(total=total_win, desc='Processing windows') as progress:
-            for start in range(0, total_win, recycle_size):
-                stop = min(start + recycle_size, total_win)
-                with Parallel(
-                    n_jobs=threadCnt,
-                    batch_size='auto',
-                    pre_dispatch='2 * n_jobs',
-                ) as parallel:
+            with Parallel(
+                n_jobs=threadCnt,
+                batch_size='auto',
+                pre_dispatch='2 * n_jobs',
+            ) as parallel:
+                for start in range(0, total_win, batch_size):
+                    stop = min(start + batch_size, total_win)
                     batch_results = parallel(
                         delayed(doMovWin_imgshp)(
                             i=i,
@@ -146,9 +148,8 @@ def doImgLbl2tile(inFileSonar: str,
                         )
                         for i in range(start, stop)
                     )
-                get_reusable_executor().shutdown(wait=True, kill_workers=True)
-                results.extend(batch_results)
-                progress.update(stop - start)
+                    results.extend(batch_results)
+                    progress.update(stop - start)
 
         status_counter = Counter()
         exported = []
