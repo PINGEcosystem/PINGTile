@@ -478,13 +478,20 @@ def reproject_raster_keep_bands(
             )
 
         profile = src.profile.copy()
+        # Drop any block size carried over from the source profile (e.g. strip-encoded
+        # rasters use blockxsize == width), since it may not be a multiple of 16 for the
+        # new (reprojected) dimensions and would otherwise cause a RasterBlockError.
+        profile.pop("blockxsize", None)
+        profile.pop("blockysize", None)
         profile.update({
             "crs": dst_crs_obj,
             "transform": transform,
             "width": width,
             "height": height,
             "compress": "LZW",
-            "tiled": True
+            "tiled": True,
+            "blockxsize": 256,
+            "blockysize": 256
         })
 
     with rio.open(src_path) as src:
