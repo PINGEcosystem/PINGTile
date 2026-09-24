@@ -59,7 +59,14 @@ def doMosaic2tile(inFile: str,
     # Optimize moving window 
     # ## by subsetting to only those that intersect the mask_reproj
 
+    # Generously buffered footprint so windows that only partially overlap
+    # the real data near the survey edge aren't dropped from tiling.
     maskFootprint = getMaskFootprint(sonPath=mosaic_reproj)
+
+    # Tight (unbuffered) footprint used later to mask predicted pixels back
+    # to the mosaic's actual sonar coverage; the generous buffer above would
+    # let predictions bleed well beyond the real data edge if reused here.
+    precise_footprint = getMaskFootprint(sonPath=mosaic_reproj, buffer_m=0.0)
 
     if maskFootprint is not None:
         # Filter windows that intersect the actual data footprint
@@ -144,4 +151,4 @@ def doMosaic2tile(inFile: str,
     if del_reproj:
         os.remove(mosaic_reproj)
     
-    return dfAll, maskFootprint
+    return dfAll, precise_footprint
