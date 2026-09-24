@@ -196,6 +196,7 @@ def run_mapper_workflow(
     smoothTol_m: float = 0.5,
     image_norm_method: str = "standardize",
     valid_threshold: float = 0.5,
+    grayscale: bool = False,
     print_usage=None,
     predict_tiles=None,
     debug: bool = False,
@@ -248,6 +249,7 @@ def run_mapper_workflow(
             threadCnt=threadCnt,
             target_size=target_size,
             minArea_percent=minArea_percent,
+            grayscale=grayscale,
         )
         if list_mosaics:
             tile_cnt = len(r) if r is not None else 0

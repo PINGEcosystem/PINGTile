@@ -1150,6 +1150,7 @@ def doMovWin(i: int,
              windowSize: tuple,
              reclassify: dict={},
              save_rgb: bool = False,
+             grayscale: bool = False,
              ):
 
     mosaicName = os.path.basename(mosaic)
@@ -1173,8 +1174,23 @@ def doMovWin(i: int,
         try:
             clipped_mosaic_all, clipped_transform = mask(sonRast, [window_geom], crop=True, filled=False)
 
-            # Work from the first band for tiling while preserving valid-data semantics.
-            clipped_mosaic = clipped_mosaic_all[0, :, :]
+            # Match the training-tile grayscale conversion when requested.
+            if grayscale and sonRast.count > 1:
+                band_count = min(sonRast.count, 3)
+                bands = np.asarray([
+                    np.where(~np.ma.getmaskarray(clipped_mosaic_all[b]),
+                             np.ma.getdata(clipped_mosaic_all[b]), 0).astype('float32', copy=False)
+                    for b in range(band_count)
+                ], dtype='float32')
+                weights = np.array([0.299, 0.587, 0.114][:band_count], dtype='float32')
+                weights /= weights.sum()
+                clipped_mosaic = np.ma.array(
+                    np.tensordot(weights, bands, axes=1),
+                    mask=np.ma.getmaskarray(clipped_mosaic_all[0]),
+                )
+            else:
+                # Work from the first band for tiling while preserving valid-data semantics.
+                clipped_mosaic = clipped_mosaic_all[0, :, :]
             clipped_data = clipped_mosaic.data
             valid_mask = ~np.ma.getmaskarray(clipped_mosaic)
 
@@ -1223,7 +1239,7 @@ def doMovWin(i: int,
                         fileName = f"{mosaicName}_{windowSize[0]}m_{win_coords}"
                     out_raster_path = os.path.join(outSonDir, f"{fileName}.png")
 
-                    if save_rgb and sonRast.count >= 3:
+                    if save_rgb and not grayscale and sonRast.count >= 3:
                         # Save 3-band RGB output
                         rgb_data = np.stack([
                             np.where(valid_mask, clipped_mosaic_all[b].data, 0).astype(np.uint8)
