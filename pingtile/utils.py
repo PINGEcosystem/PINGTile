@@ -1482,7 +1482,8 @@ def avg_npz_files_batch(df: pd.DataFrame,
         'x_max': [win_maxx],
         'y_max': [win_maxy],
         'total_pix': [avg_arr.shape[1]*avg_arr.shape[2]],
-        'nonzero_prop': [np.count_nonzero(avg_arr) / avg_arr.size if avg_arr.size > 0 else 0]
+        'nonzero_prop': [np.count_nonzero(avg_arr) / avg_arr.size if avg_arr.size > 0 else 0],
+        'source_mosaic': [mosaic_tag],
     })
 
 
@@ -1988,7 +1989,9 @@ def map_npzs(df: pd.DataFrame,
     #     label_array_to_raster(row, out_dir, outName, windowSize_m, epsg)
 
     total_maps = len(df)
-    _ = Parallel(n_jobs=threadCnt)(delayed(label_array_to_raster)(df.iloc[i], out_dir, outName, minPatchSize, windowSize_m, epsg, valid_threshold) for i in tqdm(range(total_maps)))
+    map_tifs = Parallel(n_jobs=threadCnt)(delayed(label_array_to_raster)(df.iloc[i], out_dir, outName, minPatchSize, windowSize_m, epsg, valid_threshold) for i in tqdm(range(total_maps)))
+
+    df['map_tif'] = map_tifs
 
     return df
     

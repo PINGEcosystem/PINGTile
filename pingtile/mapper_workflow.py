@@ -398,11 +398,19 @@ def run_mapper_workflow(
         print('\n\nExport map as raster mosaic...\n\n')
         start_time = time.time()
 
-        map_files = glob(os.path.join(out_maps, '*.tif'))
         out_mosaic = os.path.join(outDir, 'mosaic')
         os.makedirs(out_mosaic, exist_ok=True)
 
-        mosaic_maps(map_files, out_mosaic, projName)
+        if keepIndividualMaps and 'source_mosaic' in gdf.columns:
+            # Produce a separate mosaic per source transect instead of one
+            # combined output merging every transect together.
+            for source_name, group in gdf.groupby('source_mosaic'):
+                map_files = [f for f in group['map_tif'] if f]
+                if map_files:
+                    mosaic_maps(map_files, out_mosaic, f"{projName}_{source_name}")
+        else:
+            map_files = glob(os.path.join(out_maps, '*.tif'))
+            mosaic_maps(map_files, out_mosaic, projName)
 
         print('\nDone!')
         print('Time (s):', round(time.time() - start_time, ndigits=1))
@@ -413,11 +421,20 @@ def run_mapper_workflow(
         print('\n\nExport map as shapefile...\n\n')
         start_time = time.time()
 
-        map_files = glob(os.path.join(out_maps, '*.tif'))
         out_shp = os.path.join(outDir, 'map_shp')
         os.makedirs(out_shp, exist_ok=True)
 
-        maps2Shp(map_files, out_shp, projName, configFile, minPatchSize, [1], smoothShp, smoothTol_m)
+        if keepIndividualMaps and 'source_mosaic' in gdf.columns:
+            # Produce a separate shapefile per source transect instead of one
+            # combined output merging every transect together.
+            for source_name, group in gdf.groupby('source_mosaic'):
+                map_files = [f for f in group['map_tif'] if f]
+                if map_files:
+                    maps2Shp(map_files, out_shp, f"{projName}_{source_name}", configFile, minPatchSize, [1], smoothShp, smoothTol_m)
+        else:
+            map_files = glob(os.path.join(out_maps, '*.tif'))
+            maps2Shp(map_files, out_shp, projName, configFile, minPatchSize, [1], smoothShp, smoothTol_m)
+
 
         print('\nDone!')
         print('Time (s):', round(time.time() - start_time, ndigits=1))
