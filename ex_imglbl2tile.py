@@ -37,18 +37,21 @@ if __name__ == "__main__":
     # Parameters
 
     # Map can be specified as a directory containing all map files, or a single map file to use for all mosaics.
-    map = r"D:\redbo_science\projects\USGS-CERC_2025\00_carp_group_targets\mask2shp"
+    map = r"D:\redbo_science\projects\OcklahomaStateUni_2025_SonarSubstrate\202609_BrushDeepKiamichi_SubstrateShadow_v3\datasets\maps"
 
     # Sonar Directory can be specified as a directory containing all sonar files, or a single sonar file to process (if map is a single file).
-    sonarDir = r"D:\redbo_science\projects\USGS-CERC_2025\00_carp_group_targets\Mosaics"
+    sonarDir = r"D:\redbo_science\projects\OcklahomaStateUni_2025_SonarSubstrate\202609_BrushDeepKiamichi_SubstrateShadow_v3\datasets\mosaics"
 
-    outDirTop = r'D:\redbo_science\projects\USGS-CERC_2025\01_img-lbl_v2'
-    outName = 'carp_tiles'
+    outDirTop = r'Z:\scratch'
+    outName = 'rockmapper_tiles'
 
     classCrossWalk = {
-        'background': 0,
-        'none': 1,          # No carp
-        'carp school': 2,   # Carp school
+        '0':0,
+        'Shadow':1,
+        'U':2,
+        'G':3,
+        'B_C':4,
+        'B':5
     }
 
     # classCrossWalk = {
@@ -77,12 +80,12 @@ if __name__ == "__main__":
                     # (36,36),
                     ]
 
-    windowStride = 12
-    classFieldName = 'class'
+    windowStride = 24
+    classFieldName = 'Substrate'
     minArea_percent = 0.5
     target_size = (512, 512) #(1024, 1024)
-    threadCnt = 0.75
-    epsg_out = 32616
+    threadCnt = 0.25
+    epsg_out = 32615
     doPlot = True
     lbl2COCO = True
     allowNoMapTiles = False  # Set True to also export sonar-covered tiles that have no map overlap.

@@ -191,6 +191,7 @@ def run_mapper_workflow(
     mosaicFileType: str,
     predBatchSize: int,
     deleteIntData: bool = True,
+    keepIndividualMaps: bool = False,
     minPatchSize: float = 3,
     smoothShp: bool = False,
     smoothTol_m: float = 0.5,
@@ -204,6 +205,15 @@ def run_mapper_workflow(
 ):
     '''
     Shared end-to-end mapper execution workflow.
+
+    mapRast : bool
+        Mosaic all per-transect predicted maps into a single merged
+        GeoTIFF under {outDir}/mosaic/.
+    keepIndividualMaps : bool
+        Keep the per-transect predicted maps under {outDir}/preds_mapped/
+        instead of deleting them as intermediate data. Independent of
+        deleteIntData/mapRast, so individual transect maps and/or the
+        merged mosaic can both be kept.
     '''
 
     outDir = os.path.join(outDirTop, projName)
@@ -375,7 +385,10 @@ def run_mapper_workflow(
     if not deleteIntData:
         gdf.to_csv(outDF, index=False)
 
-    if deleteIntData:
+    # Per-transect maps (out_maps/preds_mapped) are a final output, not just
+    # intermediate data, so keepIndividualMaps can preserve them even when
+    # deleteIntData is True.
+    if deleteIntData and not keepIndividualMaps:
         to_delete['out_maps'] = [out_maps]
 
     if mapRast:
