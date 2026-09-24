@@ -248,8 +248,9 @@ def run_mapper_workflow(
     start_time = time.time()
 
     imagesAll = []
+    source_footprints = {}
     for mosaic in mosaics:
-        r = doMosaic2tile(
+        r, mosaic_footprint = doMosaic2tile(
             inFile=mosaic,
             outDir=outSonDir,
             windowSize=windowSize_m,
@@ -262,8 +263,11 @@ def run_mapper_workflow(
             grayscale=grayscale,
         )
         # Tag tiles with their source mosaic name so downstream per-window
-        # outputs can be traced back to the originating transect.
-        r['source_mosaic'] = os.path.splitext(os.path.basename(mosaic))[0]
+        # outputs can be traced back to the originating transect, and record
+        # its real sonar-data footprint so predictions can be masked to it.
+        source_name = os.path.splitext(os.path.basename(mosaic))[0]
+        r['source_mosaic'] = source_name
+        source_footprints[source_name] = mosaic_footprint
         if list_mosaics:
             tile_cnt = len(r) if r is not None else 0
             print(f"Tiles accepted from {os.path.basename(mosaic)}: {tile_cnt}")
@@ -374,6 +378,7 @@ def run_mapper_workflow(
         epsg=epsg,
         threadCnt=threadCnt,
         valid_threshold=valid_threshold,
+        footprints=source_footprints,
     )
 
     if deleteIntData:

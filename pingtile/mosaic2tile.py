@@ -144,4 +144,4 @@ def doMosaic2tile(inFile: str,
     if del_reproj:
         os.remove(mosaic_reproj)
     
-    return dfAll
+    return dfAll, maskFootprint

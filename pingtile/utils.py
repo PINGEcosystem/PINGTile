@@ -1459,8 +1459,10 @@ def avg_npz_files_batch(df: pd.DataFrame,
     # files stay unique/traceable when multiple transects are processed together.
     if 'source_mosaic' in overlaps.columns and not overlaps['source_mosaic'].empty:
         mosaic_tag = overlaps['source_mosaic'].mode().iloc[0]
+        contributing_sources = sorted(overlaps['source_mosaic'].dropna().unique().tolist())
     else:
         mosaic_tag = None
+        contributing_sources = []
 
     # Save the clipped raster and shapefile
     name_parts = [p for p in (outName, mosaic_tag) if p]
@@ -1484,6 +1486,7 @@ def avg_npz_files_batch(df: pd.DataFrame,
         'total_pix': [avg_arr.shape[1]*avg_arr.shape[2]],
         'nonzero_prop': [np.count_nonzero(avg_arr) / avg_arr.size if avg_arr.size > 0 else 0],
         'source_mosaic': [mosaic_tag],
+        'source_mosaics': [';'.join(contributing_sources)],
     })
 
 
@@ -1572,7 +1575,7 @@ def avg_npz_files(df: pd.DataFrame,
 
 
 #========================================================
-def label_array_to_raster(df, out_dir: str, outName: str, minPatchSize: float, windowSize_m: tuple, epsg: int, valid_threshold: float = 0.5):
+def label_array_to_raster(df, out_dir: str, outName: str, minPatchSize: float, windowSize_m: tuple, epsg: int, valid_threshold: float = 0.5, footprints: dict = None):
     """
     Create a georeferenced single-band GeoTIFF from an npz softmax array.
 
@@ -1582,6 +1585,10 @@ def label_array_to_raster(df, out_dir: str, outName: str, minPatchSize: float, w
     - outName: optional prefix for output filename
     - windowSize_m: tuple (size, size) used for naming (only first element used)
     - epsg: integer EPSG code for CRS
+    - footprints: optional dict mapping source_mosaic name -> real sonar-data
+      footprint geometry (in EPSG:epsg). Pixels outside the union of the
+      footprints for the transects that contributed to this window are
+      zeroed, so predictions don't bleed beyond actual sonar coverage.
 
     Returns
     - out_path (str) on success, None on failure
@@ -1609,6 +1616,21 @@ def label_array_to_raster(df, out_dir: str, outName: str, minPatchSize: float, w
 
     height, width = label.shape
     transform = rio.transform.from_bounds(minx, miny, maxx, maxy, width, height)
+
+    # Mask out pixels beyond the real sonar footprint(s) of the transect(s)
+    # that contributed to this window, so edge windows don't leak predictions
+    # into areas the source mosaic(s) never actually surveyed.
+    if footprints:
+        source_mosaics = df.get('source_mosaics') if hasattr(df, 'get') else None
+        source_names = [s for s in str(source_mosaics or '').split(';') if s]
+        contributing_footprints = [footprints[s] for s in source_names if footprints.get(s) is not None]
+        if contributing_footprints:
+            from shapely.ops import unary_union
+            footprint_union = unary_union(contributing_footprints)
+            inside_mask = rio_features.geometry_mask(
+                [footprint_union], out_shape=label.shape, transform=transform, invert=True
+            )
+            label[~inside_mask] = 0
 
     # Get pixel size
     pix_m = (maxx - minx) / width
@@ -1919,7 +1941,8 @@ def map_npzs(df: pd.DataFrame,
              windowSize_m: tuple, 
              epsg: int,
              threadCnt: int=4,
-             valid_threshold: float=0.5):
+             valid_threshold: float=0.5,
+             footprints: dict=None):
 
     '''
     '''
@@ -1989,7 +2012,7 @@ def map_npzs(df: pd.DataFrame,
     #     label_array_to_raster(row, out_dir, outName, windowSize_m, epsg)
 
     total_maps = len(df)
-    map_tifs = Parallel(n_jobs=threadCnt)(delayed(label_array_to_raster)(df.iloc[i], out_dir, outName, minPatchSize, windowSize_m, epsg, valid_threshold) for i in tqdm(range(total_maps)))
+    map_tifs = Parallel(n_jobs=threadCnt)(delayed(label_array_to_raster)(df.iloc[i], out_dir, outName, minPatchSize, windowSize_m, epsg, valid_threshold, footprints) for i in tqdm(range(total_maps)))
 
     df['map_tif'] = map_tifs
 
