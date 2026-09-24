@@ -261,6 +261,9 @@ def run_mapper_workflow(
             minArea_percent=minArea_percent,
             grayscale=grayscale,
         )
+        # Tag tiles with their source mosaic name so downstream per-window
+        # outputs can be traced back to the originating transect.
+        r['source_mosaic'] = os.path.splitext(os.path.basename(mosaic))[0]
         if list_mosaics:
             tile_cnt = len(r) if r is not None else 0
             print(f"Tiles accepted from {os.path.basename(mosaic)}: {tile_cnt}")

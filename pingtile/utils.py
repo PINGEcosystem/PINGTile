@@ -1455,11 +1455,17 @@ def avg_npz_files_batch(df: pd.DataFrame,
     # print('\n\n', avg_arr)
 
     # Save to npz
-    # Save the clipped raster and shapefile
-    if outName:
-        fileName = f"{outName}_{windowSize_m[0]}m_{win_coords}"
+    # Tag output with the dominant source mosaic (transect) so per-window
+    # files stay unique/traceable when multiple transects are processed together.
+    if 'source_mosaic' in overlaps.columns and not overlaps['source_mosaic'].empty:
+        mosaic_tag = overlaps['source_mosaic'].mode().iloc[0]
     else:
-        fileName = f"{windowSize_m[0]}m_{win_coords}"
+        mosaic_tag = None
+
+    # Save the clipped raster and shapefile
+    name_parts = [p for p in (outName, mosaic_tag) if p]
+    name_parts.append(f"{windowSize_m[0]}m_{win_coords}")
+    fileName = '_'.join(name_parts)
     out_npz = os.path.join(out_dir, f"{fileName}.npz")
 
     # df['npz'] = out_npz
